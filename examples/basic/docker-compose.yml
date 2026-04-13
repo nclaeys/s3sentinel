@@ -1,0 +1,44 @@
+version: '3.8'
+services:
+  opa:
+    image: openpolicyagent/opa:latest
+    command: ["run", "--server", "--addr", "0.0.0.0:8181", "/policies"]
+    volumes:
+      - ./policy:/policies
+    ports:
+      - "8181:8181"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8181/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 3
+
+  zitadel:
+    image: "ghcr.io/zitadel/zitadel:latest"
+    environment:
+      - ZITADEL_FIRSTINSTANCE=true
+      - ZITADEL_MASTERKEY=MySecretMasterkeyMySecretMasterkey
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/"]
+      interval: 5s
+      timeout: 10s
+      retries: 3
+
+  s3proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - OPA_ENDPOINT=http://opa:8181/v1/data/s3/allow
+      - JWKS_ENDPOINT=http://zitadel:8080/.well-known/openid-configuration/jwks
+      - JWT_ISSUER=http://zitadel:8080
+      # Add other required env vars here
+    ports:
+      - "8081:8080"
+    depends_on:
+      opa:
+        condition: service_healthy
+      zitadel:
+        condition: service_healthy
