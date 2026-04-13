@@ -4,17 +4,31 @@ An S3-compatible reverse proxy that adds identity-aware, policy-driven access co
 
 EU cloud providers issue bucket-level service-account credentials only — there is no IAM, no STS, no resource-level policies. This proxy sits in front of your bucket, owns the service-account key, and gates every S3 operation through [OPA](https://www.openpolicyagent.org/) using the caller's OIDC identity.
 
+Two authentication flows are supported:
+
+**Flow A — Direct JWT** (simple setup, custom SDK integration required)
 ```
-Client (S3 SDK / CLI)
-  │  Authorization: Bearer <OIDC JWT>
-  ▼
-S3 Proxy  :8080
-  ├─ Validate JWT against your IdP's JWKS
-  ├─ Parse S3 action (GetObject, PutObject, …)
-  ├─ POST { principal, groups, action, bucket, key } → OPA
-  ├─ Allowed → re-sign with OVH service-account credentials
-  └─ Forward to OVH Object Storage, stream response back
+Client ──[Authorization: Bearer <OIDC JWT>]──► Proxy :8080
+                                                 ├─ Validate JWT (JWKS)
+                                                 ├─ Check OPA
+                                                 ├─ Re-sign → OVH S3
+                                                 └─ Stream response back
 ```
+
+**Flow B — STS credential vending** (standard AWS SDK integration, no custom headers)
+```
+Client ──[WebIdentityToken=<OIDC JWT>]──► STS :8090
+                                            └─ Validate JWT → issue temp credentials
+                                               (AccessKeyID + SecretKey + SessionToken)
+
+Client ──[AWS SigV4 + X-Amz-Security-Token]──► Proxy :8080
+                                                  ├─ Validate SessionToken (HMAC JWT)
+                                                  ├─ Check OPA
+                                                  ├─ Re-sign → OVH S3
+                                                  └─ Stream response back
+```
+
+Flow B is compatible with every AWS SDK out of the box — boto3, AWS CLI, Spark, DuckDB, Terraform S3 backends, and others all support `AssumeRoleWithWebIdentity` natively.
 
 ## Prerequisites
 
@@ -146,9 +160,9 @@ curl -s -X POST http://localhost:8181/v1/data/s3/allow \
 ### 3a  Build
 
 ```bash
-git clone https://github.com/dataminded/s3-fine-grained-access.git
-cd s3-fine-grained-access
-go build -o s3proxy ./cmd/s3proxy
+git clone https://github.com/dataminded/s3sentinel.git
+cd s3sentinel
+go build -o s3sentinel ./cmd/s3sentinel
 ```
 
 ### 3b  Create `.env`
@@ -176,32 +190,63 @@ OPA_ENDPOINT=http://localhost:8181/v1/data/s3/allow
 # JWKS URI from your IdP's discovery document (.well-known/openid-configuration)
 JWKS_ENDPOINT=https://your-idp.example.com/.well-known/jwks.json
 JWT_ISSUER=https://your-idp.example.com
-JWT_AUDIENCE=s3-proxy          # comma-separated if multiple; leave blank to skip
+JWT_AUDIENCE=s3sentinel          # comma-separated if multiple; leave blank to skip
 ```
 
-### 3c  Start the proxy
+### 3c  Enable STS credential vending (optional)
+
+The STS server is off by default. To enable it, set `STS_TOKEN_SECRET` to a random HMAC key. This key signs and validates the `SessionToken` JWTs the STS server issues to clients — keep it secret and treat it like a password.
+
+**Generate a key:**
+
+```bash
+# 32 random bytes, hex-encoded — copy the output into your .env
+openssl rand -hex 32
+# example output: a3f1c2d9e4b57608f0e1d2c3b4a5961728394e5f6071829a0b1c2d3e4f50617
+```
+
+**Add to `.env`:**
+
+```dotenv
+# ── STS credential vending ─────────────────────────────────────────────────
+STS_TOKEN_SECRET=a3f1c2d9e4b57608f0e1d2c3b4a5961728394e5f6071829a0b1c2d3e4f50617
+STS_LISTEN_ADDR=:8090          # address the STS endpoint listens on
+STS_TOKEN_TTL=1h               # how long issued credentials stay valid (e.g. 30m, 2h)
+```
+
+When `STS_TOKEN_SECRET` is set the proxy starts a second HTTP server on `STS_LISTEN_ADDR` that handles `AssumeRoleWithWebIdentity` requests. The main proxy on `:8080` simultaneously accepts both the direct JWT flow (Flow A) and STS-issued session tokens (Flow B).
+
+### 3d  Start the proxy
 
 ```bash
 set -a && source .env && set +a
-./s3proxy
-# {"time":"...","level":"INFO","msg":"s3 proxy starting","addr":":8080","backend":"https://s3.gra.io.cloud.ovh.net"}
+./s3sentinel
+# {"time":"...","level":"INFO","msg":"s3 proxy starting","addr":":8080","backend":"https://s3.gra.io.cloud.ovh.net","tls":false}
+# {"time":"...","level":"INFO","msg":"sts server starting","addr":":8090","ttl":"1h0m0s"}   ← only if STS_TOKEN_SECRET is set
+# {"time":"...","level":"INFO","msg":"admin server starting","addr":":9090"}
 ```
 
 ---
 
 ## 4  Call the proxy
 
-### Using curl (Bearer token)
+There are two authentication flows. Choose based on your integration needs.
+
+---
+
+### Flow A — Direct JWT (curl / simple HTTP clients)
+
+No STS required. Pass your OIDC token directly on every request.
 
 ```bash
-# Obtain a token from your IdP first:
+# Obtain a token from your IdP:
 TOKEN=$(curl -s -X POST https://your-idp.example.com/token \
-  -d 'grant_type=password&client_id=s3-proxy&username=alice&password=...' \
+  -d 'grant_type=password&client_id=s3sentinel&username=alice&password=...' \
   | jq -r .access_token)
 
 # List objects
 curl -s http://localhost:8080/my-bucket \
-  -H "Authorization: Bearer $TOKEN" | cat
+  -H "Authorization: Bearer $TOKEN"
 
 # Download an object
 curl -s http://localhost:8080/my-bucket/datasets/report.csv \
@@ -214,69 +259,120 @@ curl -s -X PUT http://localhost:8080/my-bucket/raw/upload.csv \
   --data-binary @upload.csv
 ```
 
-### Using the AWS CLI (S3 SDK-style with fake credentials)
+For AWS SDK clients that cannot inject arbitrary headers, you can instead pass the JWT in the `X-Auth-Token` header (the proxy checks both). Configure the SDK with any fake access key / secret, point its `endpoint_url` at the proxy, and inject the header via your SDK's request hook mechanism.
 
-The AWS CLI signs requests with its configured credentials. The proxy ignores that signature and instead reads the OIDC token from the `X-Auth-Token` header.
+---
+
+### Flow B — STS credential vending (boto3, AWS CLI, Spark, DuckDB, …)
+
+The client exchanges its OIDC JWT for short-lived AWS-compatible credentials once, then uses those credentials for all subsequent S3 requests. No custom headers or SDK hooks are needed — this is standard `AssumeRoleWithWebIdentity`.
+
+#### Step 1 — exchange the JWT for temporary credentials
 
 ```bash
-aws configure --profile s3proxy
-# AWS Access Key ID:     anything   (e.g. PROXY)
-# AWS Secret Access Key: anything   (e.g. PROXY)
-# Default region name:  gra
-# Default output format: json
+TOKEN=$(curl -s -X POST https://your-idp.example.com/token \
+  -d 'grant_type=password&client_id=s3sentinel&username=alice&password=...' \
+  | jq -r .access_token)
 
-# Pass the real JWT via the custom header
-TOKEN=$(...)   # obtain from your IdP
-
-aws s3 ls s3://my-bucket/ \
-  --profile s3proxy \
-  --endpoint-url http://localhost:8080 \
-  --no-sign-request=false \
-  --request-payer=requester \  # ignored by proxy
-  -- $(: placeholder)          # see note below
-
-# Simpler approach: use an AWS_DEFAULT_REGION + custom header via the SDK
-AWS_DEFAULT_REGION=gra \
-aws s3api get-object \
-  --profile s3proxy \
-  --endpoint-url http://localhost:8080 \
-  --bucket my-bucket \
-  --key datasets/report.csv \
-  --request-payer requester \
-  outfile.csv \
-  --cli-override-endpoint-url http://localhost:8080 \
-  # pass token: add --no-sign-request and use a wrapper script, or use Python SDK below
+curl -s -X POST 'http://localhost:8090/?Action=AssumeRoleWithWebIdentity&Version=2011-06-15' \
+  --data-urlencode "WebIdentityToken=$TOKEN" \
+  --data-urlencode "RoleArn=arn:aws:iam::000000000000:role/s3sentinel" \
+  --data-urlencode "RoleSessionName=my-session"
 ```
 
-> **Tip — easiest SDK integration:** Use the Python `boto3` client, which lets you inject custom headers per-request via an event hook. See [the boto3 events documentation](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/events.html).
+Response:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>
+    <Credentials>
+      <AccessKeyId>ASIA3F9A1B2C3D4E5F6A</AccessKeyId>
+      <SecretAccessKey>a1b2c3d4e5f6...</SecretAccessKey>
+      <SessionToken>eyJhbGciOiJIUzI1NiJ9...</SessionToken>
+      <Expiration>2024-01-01T01:00:00Z</Expiration>
+    </Credentials>
+    ...
+  </AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>
+```
+
+#### Step 2 — use the credentials with any AWS SDK
+
+**boto3**
 
 ```python
 import boto3
-from botocore.auth import SigV4Auth
-from botocore import UNSIGNED
-from botocore.config import Config
 
 TOKEN = "..."   # your OIDC JWT
 
+# Exchange for temporary credentials
+sts = boto3.client(
+    "sts",
+    endpoint_url="http://localhost:8090",
+    aws_access_key_id="placeholder",       # required by boto3, not validated by STS
+    aws_secret_access_key="placeholder",
+    region_name="gra",
+)
+resp = sts.assume_role_with_web_identity(
+    RoleArn="arn:aws:iam::000000000000:role/s3sentinel",
+    RoleSessionName="my-session",
+    WebIdentityToken=TOKEN,
+)
+creds = resp["Credentials"]
+
+# Use the temporary credentials for S3 — no custom headers needed
 s3 = boto3.client(
     "s3",
     endpoint_url="http://localhost:8080",
-    aws_access_key_id="PROXY",          # fake – ignored by proxy
-    aws_secret_access_key="PROXY",      # fake – ignored by proxy
+    aws_access_key_id=creds["AccessKeyId"],
+    aws_secret_access_key=creds["SecretAccessKey"],
+    aws_session_token=creds["SessionToken"],
     region_name="gra",
-    config=Config(signature_version=UNSIGNED),
 )
 
-# Inject the JWT on every request
-def add_auth_header(request, **kwargs):
-    request.headers["Authorization"] = f"Bearer {TOKEN}"
-
-s3.meta.events.register("before-send.s3.*", add_auth_header)
-
-# Use normally
 response = s3.list_objects_v2(Bucket="my-bucket", Prefix="datasets/")
 for obj in response.get("Contents", []):
     print(obj["Key"])
+```
+
+**AWS CLI**
+
+```bash
+# Write a web identity token file (AWS CLI reads it automatically)
+echo "$TOKEN" > /tmp/web-identity-token
+
+# Configure a profile that uses web identity
+cat >> ~/.aws/config <<'EOF'
+[profile s3sentinel]
+role_arn = arn:aws:iam::000000000000:role/s3sentinel
+web_identity_token_file = /tmp/web-identity-token
+sts_regional_endpoints = regional
+EOF
+
+# Use it — the CLI calls STS and refreshes credentials automatically
+AWS_DEFAULT_REGION=gra \
+  aws s3 ls s3://my-bucket/ \
+  --profile s3sentinel \
+  --endpoint-url http://localhost:8080 \
+  --sts-endpoint-url http://localhost:8090
+```
+
+**DuckDB**
+
+```sql
+-- Install the httpfs extension first: INSTALL httpfs; LOAD httpfs;
+CALL load_aws_credentials('s3sentinel');   -- picks up ~/.aws/config profile above
+
+-- Or set credentials directly after fetching them via boto3 / curl:
+SET s3_endpoint = 'localhost:8080';
+SET s3_use_ssl = false;
+SET s3_url_style = 'path';
+SET s3_access_key_id     = 'ASIA3F9A1B2C3D4E5F6A';
+SET s3_secret_access_key = 'a1b2c3d4e5f6...';
+SET s3_session_token     = 'eyJhbGciOiJIUzI1NiJ9...';
+
+SELECT * FROM read_parquet('s3://my-bucket/datasets/sales/2024.parquet');
 ```
 
 ---
@@ -298,6 +394,9 @@ for obj in response.get("Contents", []):
 | `JWKS_ENDPOINT` | **yes** | — | JWKS URI from your IdP |
 | `JWT_ISSUER` | no | — | Expected `iss` claim; omit to skip issuer validation |
 | `JWT_AUDIENCE` | no | — | Comma-separated expected `aud` claims; omit to skip |
+| `STS_TOKEN_SECRET` | no | — | HMAC key for signing/validating SessionToken JWTs. When set, the STS server starts and the proxy accepts session tokens. Generate with `openssl rand -hex 32`. |
+| `STS_LISTEN_ADDR` | no | `:8090` | Address the STS server listens on (only used when `STS_TOKEN_SECRET` is set) |
+| `STS_TOKEN_TTL` | no | `1h` | Lifetime of issued credentials. Go duration syntax: `30m`, `2h`, `24h`. |
 
 ### Enabling TLS
 
@@ -356,17 +455,17 @@ curl http://localhost:9090/readyz
 Exposes metrics in the OpenMetrics format. Scrape with any Prometheus-compatible collector.
 
 ```bash
-curl -s http://localhost:9090/metrics | grep s3proxy
+curl -s http://localhost:9090/metrics | grep s3sentinel
 ```
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `s3proxy_http_requests_total` | counter | `action`, `status` | All completed requests by S3 action and HTTP status code |
-| `s3proxy_http_request_duration_seconds` | histogram | `action` | End-to-end request latency |
-| `s3proxy_jwt_validations_total` | counter | `result` (`success`\|`error`) | JWT validation outcomes |
-| `s3proxy_opa_evaluations_total` | counter | `result` (`allow`\|`deny`\|`error`) | OPA policy decision outcomes |
-| `s3proxy_opa_evaluation_duration_seconds` | histogram | — | Time spent waiting for OPA |
-| `s3proxy_backend_requests_total` | counter | `status` | HTTP status codes returned by the backend S3 service |
+| `s3sentinel_http_requests_total` | counter | `action`, `status` | All completed requests by S3 action and HTTP status code |
+| `s3sentinel_http_request_duration_seconds` | histogram | `action` | End-to-end request latency |
+| `s3sentinel_jwt_validations_total` | counter | `result` (`success`\|`error`) | JWT validation outcomes |
+| `s3sentinel_opa_evaluations_total` | counter | `result` (`allow`\|`deny`\|`error`) | OPA policy decision outcomes |
+| `s3sentinel_opa_evaluation_duration_seconds` | histogram | — | Time spent waiting for OPA |
+| `s3sentinel_backend_requests_total` | counter | `status` | HTTP status codes returned by the backend S3 service |
 
 Go runtime and process metrics (`go_*`, `process_*`) are included automatically.
 
@@ -406,7 +505,7 @@ docker run -d --name keycloak -p 8080:8080 \
 
 1. Open `http://localhost:8080`, log in as `admin/admin`.
 2. Create a realm (e.g. `dev`).
-3. Create a client `s3-proxy` with **Direct Access Grants** enabled.
+3. Create a client `s3sentinel` with **Direct Access Grants** enabled.
 4. Create a user, set a password.
 5. Add a mapper: **User Attribute → groups** → claim name `groups`, multivalued.
 
@@ -414,7 +513,7 @@ docker run -d --name keycloak -p 8080:8080 \
 # Get a token
 TOKEN=$(curl -s -X POST \
   http://localhost:8080/realms/dev/protocol/openid-connect/token \
-  -d 'grant_type=password&client_id=s3-proxy&username=alice&password=alice' \
+  -d 'grant_type=password&client_id=s3sentinel&username=alice&password=alice' \
   | jq -r .access_token)
 
 # Set env vars to point to Keycloak
@@ -426,7 +525,7 @@ export JWT_ISSUER=http://localhost:8080/realms/dev
 
 ```
 Terminal 1 — OPA:    opa run --server --addr :8181 policy/
-Terminal 2 — Proxy:  set -a && source .env && set +a && ./s3proxy
+Terminal 2 — Proxy:  set -a && source .env && set +a && ./s3sentinel
 Terminal 3 — Test:   curl -s http://localhost:8080/my-bucket -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -437,8 +536,8 @@ Terminal 3 — Test:   curl -s http://localhost:8080/my-bucket -H "Authorization
 ```
 .
 ├── cmd/
-│   └── s3proxy/
-│       └── main.go              # Entry point, signal handling
+│   └── s3sentinel/
+│       └── main.go              # Entry point, signal handling, server wiring
 ├── internal/
 │   ├── auth/
 │   │   └── jwt.go               # OIDC JWT validation with JWKS caching
@@ -451,8 +550,11 @@ Terminal 3 — Test:   curl -s http://localhost:8080/my-bucket -H "Authorization
 │   │   └── client.go            # OPA REST API client
 │   ├── proxy/
 │   │   └── handler.go           # Main pipeline: auth → OPA → re-sign → stream
-│   └── s3/
-│       └── parser.go            # S3 action/bucket/key parser
+│   ├── s3/
+│   │   └── parser.go            # S3 action/bucket/key parser
+│   └── sts/
+│       ├── handler.go           # AssumeRoleWithWebIdentity HTTP handler
+│       └── token.go             # Stateless credential issuance and SessionToken validation
 ├── policy/
 │   └── s3.rego                  # Your OPA policy (not committed — add your own)
 ├── .env.example                 # Environment variable template
@@ -465,6 +567,8 @@ Terminal 3 — Test:   curl -s http://localhost:8080/my-bucket -H "Authorization
 ## 9  How it works
 
 ### Request flow
+
+**Flow A — Direct JWT**
 
 ```
 1. Client sends an S3-shaped HTTP request with an OIDC JWT in
@@ -482,25 +586,46 @@ Terminal 3 — Test:   curl -s http://localhost:8080/my-bucket -H "Authorization
    OPA deny → 403.  OPA error → 500 (fail-closed).
 
 5. Proxy strips the client's auth headers and re-signs the request with the
-   OVH service-account credentials using SigV4. The body hash in the signature
-   is set to the literal string "UNSIGNED-PAYLOAD" — a standard SigV4 option
-   that tells the server not to verify the body hash. This avoids reading the
-   entire request body into memory before forwarding, which matters for large
-   PutObject uploads. OVH Object Storage (and all Ceph-based providers) accept
-   unsigned payloads.
+   OVH service-account credentials using SigV4. The body hash is set to
+   "UNSIGNED-PAYLOAD" — a standard SigV4 option that avoids buffering the
+   entire request body for SHA-256 hashing, which matters for large uploads.
 
 6. Proxy forwards to OVH Object Storage and streams the response back.
 ```
 
-### Token delivery for S3 SDKs
+**Flow B — STS credential vending**
 
-S3 SDKs always send an `Authorization: AWS4-HMAC-SHA256 ...` header. To use the proxy transparently from any SDK:
+```
+[Credential exchange — happens once per TTL]
 
-- Configure the SDK with **any** fake access key and secret (the proxy ignores the AWS signature).
-- Pass the OIDC JWT in the custom `X-Auth-Token` header (the proxy reads it from there).
-- Point the SDK's `endpoint_url` at the proxy.
+1. Client POSTs to the STS server (:8090):
+   Action=AssumeRoleWithWebIdentity
+   WebIdentityToken=<OIDC JWT>
 
-The `Authorization: Bearer` path is the simpler alternative for direct HTTP callers (curl, httpx, etc.).
+2. STS validates the JWT against the IdP's JWKS (same validator as the proxy).
+
+3. STS issues three values:
+   - AccessKeyID:     random, AWS-style identifier (ASIA...)
+   - SecretAccessKey: random, used by the SDK for SigV4 signing
+   - SessionToken:    HMAC-signed JWT containing { sub, email, groups, exp }
+                      — stateless; no database or shared state required
+
+[Every subsequent S3 request]
+
+4. Client signs the request with AccessKeyID + SecretAccessKey (standard SigV4)
+   and attaches the SessionToken in the X-Amz-Security-Token header.
+
+5. Proxy detects the AWS4-HMAC-SHA256 Authorization header and reads the
+   SessionToken from X-Amz-Security-Token.
+
+6. Proxy validates the SessionToken's HMAC signature and expiry.
+   The principal, email, and groups are extracted directly from the token.
+   No JWKS lookup or IdP call is needed per-request.
+
+7. Steps 3–6 of Flow A apply (OPA check → re-sign → forward).
+```
+
+The SessionToken is a signed JWT, not an opaque token — the proxy verifies it locally using the shared `STS_TOKEN_SECRET`. There is no token store, no revocation list, and no database. Access is revoked when the token expires (configurable via `STS_TOKEN_TTL`).
 
 ---
 
@@ -525,11 +650,7 @@ Presigned URLs embed credentials and an expiry directly in a query string, bypas
 
 ### Client-side AWS signature validation
 
-The proxy does not verify the AWS SigV4 signature that S3 SDKs attach to requests. It reads the client's identity from the OIDC JWT only. The fake AWS credentials configured in the SDK are never checked — any key/secret pair is accepted. This is intentional: the JWT is the trust boundary, not the AWS signature.
-
-### STS / temporary credential vending
-
-There is no STS endpoint. The proxy does not issue short-lived AWS credentials to callers. If your tooling requires `AssumeRoleWithWebIdentity` or similar, you need a separate credential-vending service in front of the proxy.
+The proxy does not verify the AWS SigV4 signature that S3 SDKs attach to requests. In Flow A, the client's identity comes from the OIDC JWT only — the fake AWS credentials configured in the SDK are never checked. In Flow B, the identity comes from the SessionToken JWT; the SigV4 signature is still not validated. This is intentional: the JWT (OIDC or session token) is the trust boundary, not the AWS signature.
 
 ### Unimplemented S3 operations
 

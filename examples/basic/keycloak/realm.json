@@ -1,0 +1,58 @@
+{
+  "realm": "s3sentinel",
+  "enabled": true,
+  "displayName": "S3 Sentinel",
+  "registrationAllowed": false,
+  "clients": [
+    {
+      "clientId": "s3sentinel",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "groups": [
+    { "name": "reader" },
+    { "name": "admin" }
+  ],
+  "users": [
+    {
+      "username": "reader",
+      "email": "reader@example.com",
+      "firstName": "Reader",
+      "lastName": "User",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "reader123", "temporary": false }
+      ],
+      "groups": ["/reader"]
+    },
+    {
+      "username": "admin",
+      "email": "admin@example.com",
+      "firstName": "Admin",
+      "lastName": "User",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "admin123", "temporary": false }
+      ],
+      "groups": ["/admin"]
+    }
+  ]
+}

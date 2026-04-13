@@ -13,11 +13,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/dataminded/s3-fine-grained-access/internal/auth"
-	"github.com/dataminded/s3-fine-grained-access/internal/config"
-	"github.com/dataminded/s3-fine-grained-access/internal/observability"
-	"github.com/dataminded/s3-fine-grained-access/internal/opa"
-	"github.com/dataminded/s3-fine-grained-access/internal/proxy"
+	"github.com/dataminded/s3sentinel/internal/auth"
+	"github.com/dataminded/s3sentinel/internal/config"
+	"github.com/dataminded/s3sentinel/internal/observability"
+	"github.com/dataminded/s3sentinel/internal/opa"
+	"github.com/dataminded/s3sentinel/internal/proxy"
+	"github.com/dataminded/s3sentinel/internal/sts"
 )
 
 func main() {
@@ -59,6 +60,7 @@ func main() {
 		OPAClient:       opaClient,
 		Metrics:         metrics,
 		Logger:          logger,
+		STSTokenSecret:  cfg.STSTokenSecret,
 	})
 
 	proxySrv := &http.Server{
@@ -69,6 +71,24 @@ func main() {
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
+	}
+
+	// ── STS server (credential vending, optional) ────────────────────────────
+	var stsSrv *http.Server
+	if cfg.STSEnabled() {
+		stsHandler := sts.NewHandler(sts.Config{
+			JWTValidator: jwtValidator,
+			TokenSecret:  cfg.STSTokenSecret,
+			TokenTTL:     cfg.STSTokenTTL,
+			Logger:       logger,
+		})
+		stsSrv = &http.Server{
+			Addr:         cfg.STSListenAddr,
+			Handler:      stsHandler,
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  30 * time.Second,
+		}
 	}
 
 	// ── Admin server (/healthz, /readyz, /metrics) ───────────────────────────
@@ -127,6 +147,19 @@ func main() {
 		}
 	}()
 
+	if stsSrv != nil {
+		go func() {
+			logger.Info("sts server starting",
+				"addr", cfg.STSListenAddr,
+				"ttl", cfg.STSTokenTTL,
+			)
+			if err := stsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("sts server error", "error", err)
+				os.Exit(1)
+			}
+		}()
+	}
+
 	// ── Graceful shutdown ────────────────────────────────────────────────────
 	<-ctx.Done()
 	logger.Info("shutting down gracefully")
@@ -139,5 +172,10 @@ func main() {
 	}
 	if err := adminSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("admin shutdown error", "error", err)
+	}
+	if stsSrv != nil {
+		if err := stsSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("sts shutdown error", "error", err)
+		}
 	}
 }

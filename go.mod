@@ -1,4 +1,4 @@
-module github.com/dataminded/s3-fine-grained-access
+module github.com/dataminded/s3sentinel
 
 go 1.25.0
 

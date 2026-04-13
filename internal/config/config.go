@@ -2,8 +2,10 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // Config holds all runtime configuration for the proxy.
@@ -38,11 +40,27 @@ type Config struct {
 	JWKSEndpoint string   // JWKS URI of your IdP
 	JWTIssuer    string   // expected `iss` claim (recommended)
 	JWTAudience  []string // expected `aud` claim(s), comma-separated in env
+
+	// STS — credential vending (optional).
+	// When STSTokenSecret is empty the STS server is not started and the proxy
+	// only accepts Bearer / X-Auth-Token JWT authentication.
+	STSListenAddr  string        // default: :8090
+	STSTokenSecret []byte        // HMAC key for signing/validating SessionToken JWTs
+	STSTokenTTL    time.Duration // lifetime of issued credentials (default: 1h)
 }
 
 // Load reads configuration from environment variables and returns an error
 // if any required variable is absent.
 func Load() (Config, error) {
+	stsSecret := []byte(os.Getenv("STS_TOKEN_SECRET"))
+	if len(stsSecret) == 0 {
+		stsSecret = nil
+	}
+	stsTTL, err := parseDuration(os.Getenv("STS_TOKEN_TTL"), time.Hour)
+	if err != nil {
+		return Config{}, fmt.Errorf("STS_TOKEN_TTL: %w", err)
+	}
+
 	cfg := Config{
 		ListenAddr:      getenv("LISTEN_ADDR", ":8080"),
 		AdminAddr:       getenv("ADMIN_ADDR", ":9090"),
@@ -57,6 +75,9 @@ func Load() (Config, error) {
 		JWKSEndpoint:    os.Getenv("JWKS_ENDPOINT"),
 		JWTIssuer:       os.Getenv("JWT_ISSUER"),
 		JWTAudience:     splitCSV(os.Getenv("JWT_AUDIENCE")),
+		STSListenAddr:   getenv("STS_LISTEN_ADDR", ":8090"),
+		STSTokenSecret:  stsSecret,
+		STSTokenTTL:     stsTTL,
 	}
 
 	required := map[string]string{
@@ -86,11 +107,24 @@ func (c Config) TLSEnabled() bool {
 	return c.TLSCertFile != "" && c.TLSKeyFile != ""
 }
 
+// STSEnabled reports whether the STS credential-vending server should be started.
+func (c Config) STSEnabled() bool {
+	return len(c.STSTokenSecret) > 0
+}
+
 func getenv(key, defaultVal string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return defaultVal
+}
+
+// parseDuration parses s as a time.Duration, returning defaultVal when s is empty.
+func parseDuration(s string, defaultVal time.Duration) (time.Duration, error) {
+	if s == "" {
+		return defaultVal, nil
+	}
+	return time.ParseDuration(s)
 }
 
 func splitCSV(s string) []string {

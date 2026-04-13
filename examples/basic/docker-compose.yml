@@ -1,55 +1,105 @@
-version: '3.8'
 services:
+
+  # ── MinIO (local S3 backend) ──────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # Web console → http://localhost:9001
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Create the example bucket and seed a test object on first start.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/example-bucket &&
+        echo 'Hello from s3sentinel!' | mc pipe local/example-bucket/hello.txt &&
+        echo 'Bucket ready.'
+      "
+
+  # ── Keycloak (OIDC identity provider) ─────────────────────────────────────
+  # The realm, client, groups (reader / admin), and two test users are imported
+  # automatically from keycloak/realm.json on first start.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8180:8080"  # http://localhost:8180
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/s3sentinel/.well-known/openid-configuration || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  # ── OPA (policy engine) ───────────────────────────────────────────────────
   opa:
     image: openpolicyagent/opa:latest
     command: ["run", "--server", "--addr", "0.0.0.0:8181", "/policies"]
     volumes:
-      - ./policy:/policies
+      - ./policy:/policies:ro
     ports:
       - "8181:8181"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8181/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8181/health"]
       interval: 5s
-      timeout: 10s
-      retries: 3
+      timeout: 5s
+      retries: 5
 
-  zitadel:
-    image: "ghcr.io/zitadel/zitadel:latest"
-    environment:
-      - ZITADEL_FIRSTINSTANCE=true
-      - ZITADEL_MASTERKEY=MySecretMasterkeyMySecretMasterkey
-    ports:
-      - "8080:8080"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/"]
-      interval: 5s
-      timeout: 10s
-      retries: 3
-    volumes:
-      - ./bootstrap-users.sh:/bootstrap-users.sh
-
-  zitadel-init:
-    image: ghcr.io/zitadel/zitadel:latest
-    depends_on:
-      zitadel:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-c", "sleep 10 && /init-zitadel-users.sh"]
-    volumes:
-      - ./bootstrap-users.sh:/bootstrap-users.sh
-
-  s3proxy:
+  # ── s3sentinel (proxy + STS) ───────────────────────────────────────────────
+  # Build context points at the project root (two levels up from this file).
+  s3sentinel:
     build:
-      context: .
+      context: ../..
       dockerfile: Dockerfile
     environment:
-      - OPA_ENDPOINT=http://opa:8181/v1/data/s3/allow
-      - JWKS_ENDPOINT=http://zitadel:8080/.well-known/openid-configuration/jwks
-      - JWT_ISSUER=http://zitadel:8080
-      # Add other required env vars here
+      # S3 backend — MinIO running in this compose stack
+      BACKEND_ENDPOINT: http://minio:9000
+      BACKEND_REGION: us-east-1
+      BACKEND_ACCESS_KEY: minioadmin
+      BACKEND_SECRET_KEY: minioadmin
+
+      # OPA
+      OPA_ENDPOINT: http://opa:8181/v1/data/s3/allow
+
+      # OIDC — Keycloak running in this compose stack.
+      # JWT_ISSUER is intentionally left unset: tokens are fetched from
+      # http://localhost:8180, but s3sentinel reaches Keycloak via the
+      # internal hostname keycloak:8080, so the iss claim won't match.
+      # Set JWT_ISSUER in production once both sides share the same URL.
+      JWKS_ENDPOINT: http://keycloak:8080/realms/s3sentinel/protocol/openid-connect/certs
+
+      # STS credential vending.
+      # Generate a real key with: make gen-sts-secret
+      STS_TOKEN_SECRET: dev-only-change-this-secret-in-production
+      STS_LISTEN_ADDR: ":8090"
+      STS_TOKEN_TTL: 1h
     ports:
-      - "8081:8080"
+      - "8080:8080"  # S3 proxy
+      - "8090:8090"  # STS endpoint
+      - "9090:9090"  # Admin: /healthz /readyz /metrics
     depends_on:
-      opa:
+      minio:
         condition: service_healthy
-      zitadel:
+      keycloak:
+        condition: service_healthy
+      opa:
         condition: service_healthy

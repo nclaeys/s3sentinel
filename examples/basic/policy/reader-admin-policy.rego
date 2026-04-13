@@ -1,18 +1,25 @@
 package s3
 
-   # Admins can perform any operation on any bucket.
-   allow {
-       input.groups[_] == "admin"
-   }
+import rego.v1
 
-   # Readers can only perform read actions on any bucket.
-   allow {
-       input.groups[_] == "reader"
-       input.action in {
-           "GetObject",
-           "HeadObject",
-           "ListObjects",
-           "ListObjectsV2",
-           "GetObjectTagging",
-       }
-   }
+# Deny everything by default.
+default allow := false
+
+# Admins can perform any operation on any bucket.
+allow if {
+    input.groups[_] == "admin"
+}
+
+# Readers can list buckets and read objects.
+allow if {
+    input.groups[_] == "reader"
+    input.action in {
+        "ListBuckets",
+        "HeadBucket",
+        "ListObjects",
+        "ListObjectsV2",
+        "HeadObject",
+        "GetObject",
+        "GetObjectTagging",
+    }
+}
