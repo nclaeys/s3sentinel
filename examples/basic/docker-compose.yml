@@ -25,6 +25,17 @@ services:
       interval: 5s
       timeout: 10s
       retries: 3
+    volumes:
+      - ./bootstrap-users.sh:/bootstrap-users.sh
+
+  zitadel-init:
+    image: ghcr.io/zitadel/zitadel:latest
+    depends_on:
+      zitadel:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c", "sleep 10 && /init-zitadel-users.sh"]
+    volumes:
+      - ./bootstrap-users.sh:/bootstrap-users.sh
 
   s3proxy:
     build:
