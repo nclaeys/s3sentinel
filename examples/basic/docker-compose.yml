@@ -2,6 +2,8 @@ services:
 
   # ── MinIO (local S3 backend) ──────────────────────────────────────────────
   minio:
+    networks:
+      s3sentinel_net:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
@@ -19,6 +21,8 @@ services:
   # Create the example bucket and seed a test object on first start.
   minio-init:
     image: minio/mc:latest
+    networks:
+      s3sentinel_net:
     depends_on:
       minio:
         condition: service_healthy
@@ -34,39 +38,48 @@ services:
   # The realm, client, groups (reader / admin), and two test users are imported
   # automatically from keycloak/realm.json on first start.
   keycloak:
-    image: quay.io/keycloak/keycloak:26
-    command: start-dev --import-realm
+    image: quay.io/keycloak/keycloak:26.0.7
+    command: ["start-dev", "--import-realm", "--verbose", "--log-level=INFO" ]
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
     ports:
-      - "8180:8080"  # http://localhost:8180
+      - "8180:8080"  # http://localhost:8080
     volumes:
       - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    networks:
+      s3sentinel_net:
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/s3sentinel/.well-known/openid-configuration || exit 1"]
-      interval: 10s
+      test: ["CMD-SHELL", 'exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e "GET /realms/s3sentinel/.well-known/openid-configuration HTTP/1.0\r\nhost: 127.0.0.1:8080\r\n\r\n" >&3 && grep -q "jwks_uri" <&3']
+      interval: 5s
       timeout: 10s
-      retries: 15
-      start_period: 30s
+      retries: 3
+      start_period: 60s
 
   # ── OPA (policy engine) ───────────────────────────────────────────────────
+  # The -debug image variant adds busybox (wget, sh) to the otherwise
+  # empty scratch image, which is required for the health check.
   opa:
-    image: openpolicyagent/opa:latest
-    command: ["run", "--server", "--addr", "0.0.0.0:8181", "/policies"]
+    image: openpolicyagent/opa:1.10.1-debug
+    command: ["run", "--server", "--addr", "0.0.0.0:8181", "--log-format", "text", "--log-level", "debug", "/policies"]
     volumes:
-      - ./policy:/policies:ro
+      - ./policy:/policies
     ports:
       - "8181:8181"
+    networks:
+      s3sentinel_net:
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8181/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8181/health"]
       interval: 5s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ── s3sentinel (proxy + STS) ───────────────────────────────────────────────
   # Build context points at the project root (two levels up from this file).
   s3sentinel:
+    networks:
+      s3sentinel_net:
     build:
       context: ../..
       dockerfile: Dockerfile
@@ -103,3 +116,5 @@ services:
         condition: service_healthy
       opa:
         condition: service_healthy
+networks:
+  s3sentinel_net:
