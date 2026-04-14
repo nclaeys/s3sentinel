@@ -44,7 +44,7 @@ BUCKET = "example-bucket"
 STS_SECRET = b"dev-only-change-this-secret-in-production"
 
 
-def get_token(username: str, password: str) -> str:
+def get_jwt_token(username: str, password: str) -> str:
     data = urllib.parse.urlencode(
         {
             "grant_type": "password",
@@ -126,13 +126,13 @@ def s3_client(creds: dict):
 
 
 def main() -> None:
-    # ── Inspect the reader's SessionToken ─────────────────────────────────────
-    reader_token = get_token("reader", "reader123")
+    reader_token = get_jwt_token("reader", "reader123")
     reader_creds = assume_role(reader_token)
     print_session_token("reader", reader_creds["SessionToken"], STS_SECRET)
 
-    # ── Admin: upload a file ──────────────────────────────────────────────────
-    admin_s3 = s3_client(assume_role(get_token("admin", "admin123")))
+    admin_creds = assume_role(get_jwt_token("admin", "admin123"))
+    print_session_token("admin", admin_creds["SessionToken"], STS_SECRET)
+    admin_s3 = s3_client(admin_creds)
     admin_s3.put_object(
         Bucket=BUCKET,
         Key="reports/report.csv",
@@ -140,12 +140,10 @@ def main() -> None:
     )
     print("admin upload: OK")
 
-    # ── Reader: download the same file ────────────────────────────────────────
     reader_s3 = s3_client(reader_creds)
     obj = reader_s3.get_object(Bucket=BUCKET, Key="reports/report.csv")
     print("reader download:", obj["Body"].read().decode())
 
-    # ── Reader: upload to the same prefix — should be denied ─────────────────
     try:
         reader_s3.put_object(
             Bucket=BUCKET,

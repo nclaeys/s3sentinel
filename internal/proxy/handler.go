@@ -103,8 +103,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bucket, key := s3.ExtractBucketKey(r, h.cfg.ProxyHost)
-	s3Request := s3.Parse(r, bucket, key)
+	s3Request := s3.Parse(r, h.cfg.ProxyHost)
 	action = string(s3Request.Action)
 
 	err = h.authorizeRequest(ctx, claims, s3Request, rw)
@@ -117,7 +116,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) authorizeRequest(ctx context.Context, claims *auth.Claims, s3Request s3.S3ActionRequest, rw *responseRecorder) error {
+func (h *Handler) authorizeRequest(ctx context.Context, claims *auth.Claims, s3Request s3.S3RequestContext, rw *responseRecorder) error {
 	log := h.cfg.Logger.With(
 		"principal", claims.Subject,
 		"action", s3Request.Action,
