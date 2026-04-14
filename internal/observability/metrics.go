@@ -1,10 +1,7 @@
-// Package observability provides Prometheus metrics and HTTP health handlers.
 package observability
 
 import "github.com/prometheus/client_golang/prometheus"
 
-// Metrics holds all instrumentation counters and histograms for the proxy.
-// Create one instance with NewMetrics and pass it into the proxy handler.
 type Metrics struct {
 	// RequestsTotal counts every completed request by S3 action and HTTP status.
 	RequestsTotal *prometheus.CounterVec
@@ -25,9 +22,6 @@ type Metrics struct {
 	BackendRequestsTotal *prometheus.CounterVec
 }
 
-// NewMetrics registers all metrics on reg and returns the populated struct.
-// Use prometheus.NewRegistry() for an isolated registry, or
-// prometheus.DefaultRegisterer to add to the global default.
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		RequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{

@@ -8,22 +8,17 @@ import (
 	"time"
 )
 
-// Config holds all runtime configuration for the proxy.
 type Config struct {
-	// Network
 	ListenAddr string // default: :8080
-	AdminAddr  string // default: :9090 — serves /healthz, /readyz, /metrics
+	AdminAddr  string // default: :9090 and serves /healthz, /readyz, /metrics
 
-	// Back-end EU cloud S3 (OVH, Scaleway, Exoscale, Hetzner, …)
-	BackendEndpoint string // e.g. https://s3.gra.io.cloud.ovh.net
-	BackendRegion   string // e.g. gra, nl-ams-1, ch-gva-2
-	BackendKey      string // service-account access key (full bucket access)
+	BackendEndpoint string
+	BackendRegion   string
+	BackendKey      string // service-account access key
 	BackendSecret   string // service-account secret key
 
 	// ProxyHost is the domain the proxy itself is reachable on.
-	// When set, virtual-hosted-style requests (<bucket>.<ProxyHost>/key) are
-	// detected and the bucket is extracted from the Host header.
-	// Example: "s3.internal.example.com"
+	// When set, virtual-hosted-style requests (<bucket>.<ProxyHost>/key) can be used: "s3.internal.example.com"
 	ProxyHost string
 
 	// TLS — both fields must be set to enable HTTPS.
@@ -31,9 +26,7 @@ type Config struct {
 	TLSCertFile string // path to PEM-encoded certificate (or full chain)
 	TLSKeyFile  string // path to PEM-encoded private key
 
-	// OPA
-	// Full URL to the OPA policy rule endpoint, e.g.:
-	//   http://opa:8181/v1/data/s3/allow
+	// Full URL to the OPA policy rule endpoint, e.g.: http://opa:8181/v1/data/s3/allow
 	OPAEndpoint string
 
 	// OIDC / JWT
@@ -49,8 +42,6 @@ type Config struct {
 	STSTokenTTL    time.Duration // lifetime of issued credentials (default: 1h)
 }
 
-// Load reads configuration from environment variables and returns an error
-// if any required variable is absent.
 func Load() (Config, error) {
 	stsSecret := []byte(os.Getenv("STS_TOKEN_SECRET"))
 	if len(stsSecret) == 0 {
@@ -102,12 +93,10 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// TLSEnabled reports whether TLS should be used for the listening socket.
 func (c Config) TLSEnabled() bool {
 	return c.TLSCertFile != "" && c.TLSKeyFile != ""
 }
 
-// STSEnabled reports whether the STS credential-vending server should be started.
 func (c Config) STSEnabled() bool {
 	return len(c.STSTokenSecret) > 0
 }
@@ -119,7 +108,6 @@ func getenv(key, defaultVal string) string {
 	return defaultVal
 }
 
-// parseDuration parses s as a time.Duration, returning defaultVal when s is empty.
 func parseDuration(s string, defaultVal time.Duration) (time.Duration, error) {
 	if s == "" {
 		return defaultVal, nil

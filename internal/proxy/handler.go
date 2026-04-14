@@ -1,4 +1,3 @@
-// Package proxy implements the core S3 proxy handler.
 package proxy
 
 import (
@@ -118,7 +117,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) authorizeRequest(ctx context.Context, claims *auth.Claims, s3Request s3.ParsedRequest, rw *responseRecorder) error {
+func (h *Handler) authorizeRequest(ctx context.Context, claims *auth.Claims, s3Request s3.S3ActionRequest, rw *responseRecorder) error {
 	log := h.cfg.Logger.With(
 		"principal", claims.Subject,
 		"action", s3Request.Action,

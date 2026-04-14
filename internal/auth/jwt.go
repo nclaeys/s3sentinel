@@ -10,7 +10,6 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
-// Claims holds the principal information extracted from a validated JWT.
 type Claims struct {
 	// Subject is the `sub` claim – used as the principal identity sent to OPA.
 	Subject string
@@ -20,8 +19,6 @@ type Claims struct {
 	Groups []string
 }
 
-// JWTValidator validates OIDC JWTs against a JWKS endpoint, with automatic
-// key rotation via a background refresh cache.
 type JWTValidator struct {
 	cache    *jwk.Cache
 	jwksURL  string
@@ -29,8 +26,6 @@ type JWTValidator struct {
 	audience []string
 }
 
-// NewJWTValidator creates a JWTValidator and performs an initial JWKS fetch so
-// misconfiguration is caught at startup, not at the first request.
 func NewJWTValidator(jwksURL, issuer string, audience []string) (*JWTValidator, error) {
 	cache := jwk.NewCache(context.Background())
 
@@ -38,7 +33,6 @@ func NewJWTValidator(jwksURL, issuer string, audience []string) (*JWTValidator, 
 		return nil, fmt.Errorf("register JWKS endpoint %s: %w", jwksURL, err)
 	}
 
-	// Pre-warm: fail fast on bad URL or unreachable IdP.
 	if _, err := cache.Refresh(context.Background(), jwksURL); err != nil {
 		return nil, fmt.Errorf("initial JWKS fetch from %s: %w", jwksURL, err)
 	}
@@ -51,8 +45,6 @@ func NewJWTValidator(jwksURL, issuer string, audience []string) (*JWTValidator, 
 	}, nil
 }
 
-// Validate parses and validates rawToken, returning its principal claims.
-// It verifies the signature, expiry, issuer, and audience.
 func (v *JWTValidator) Validate(ctx context.Context, rawToken string) (*Claims, error) {
 	keyset, err := v.cache.Get(ctx, v.jwksURL)
 	if err != nil {
@@ -77,7 +69,7 @@ func (v *JWTValidator) Validate(ctx context.Context, rawToken string) (*Claims, 
 
 	claims := &Claims{
 		Subject: token.Subject(),
-		Groups:  extractGroups(token),
+		Groups:  ExtractGroups(token),
 	}
 	if v, ok := token.Get("email"); ok {
 		claims.Email, _ = v.(string)
@@ -86,8 +78,6 @@ func (v *JWTValidator) Validate(ctx context.Context, rawToken string) (*Claims, 
 	return claims, nil
 }
 
-// Check verifies that the JWKS cache still holds at least one key.
-// It satisfies observability.Checker and is used by the readiness handler.
 func (v *JWTValidator) Check(ctx context.Context) error {
 	keyset, err := v.cache.Get(ctx, v.jwksURL)
 	if err != nil {
@@ -99,9 +89,7 @@ func (v *JWTValidator) Check(ctx context.Context) error {
 	return nil
 }
 
-// extractGroups reads the "groups" JWT claim, tolerating both []string and
-// []interface{} encodings produced by different IdPs.
-func extractGroups(token jwt.Token) []string {
+func ExtractGroups(token jwt.Token) []string {
 	v, ok := token.Get("groups")
 	if !ok {
 		return nil

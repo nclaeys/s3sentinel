@@ -1,10 +1,3 @@
-// Package sts implements stateless credential vending compatible with the AWS
-// AssumeRoleWithWebIdentity API.
-//
-// The SessionToken issued by this package is a signed JWT (HS256) that encodes
-// the principal's identity (sub, email, groups) and an expiry. The proxy
-// validates the SessionToken on every request, extracting the identity without
-// any shared state or database lookup.
 package sts
 
 import (
@@ -22,7 +15,6 @@ import (
 
 const sessionTokenIssuer = "s3sentinel-sts"
 
-// Credentials holds the temporary AWS-compatible credentials issued by the STS handler.
 type Credentials struct {
 	AccessKeyID     string
 	SecretAccessKey string
@@ -33,8 +25,6 @@ type Credentials struct {
 	Expiration   time.Time
 }
 
-// IssueCredentials mints a new set of temporary credentials for the given claims.
-// secret is the HMAC key used to sign the SessionToken JWT.
 func IssueCredentials(secret []byte, claims *auth.Claims, ttl time.Duration) (*Credentials, error) {
 	now := time.Now().UTC()
 	exp := now.Add(ttl)
@@ -74,8 +64,6 @@ func IssueCredentials(secret []byte, claims *auth.Claims, ttl time.Duration) (*C
 	}, nil
 }
 
-// ValidateSessionToken parses and validates a SessionToken JWT issued by IssueCredentials.
-// It returns the identity claims encoded in the token.
 func ValidateSessionToken(secret []byte, tokenStr string) (*auth.Claims, error) {
 	tok, err := jwt.Parse([]byte(tokenStr),
 		jwt.WithKey(jwa.HS256, secret),
@@ -88,7 +76,7 @@ func ValidateSessionToken(secret []byte, tokenStr string) (*auth.Claims, error) 
 
 	claims := &auth.Claims{
 		Subject: tok.Subject(),
-		Groups:  extractGroups(tok),
+		Groups:  auth.ExtractGroups(tok),
 	}
 	if v, ok := tok.Get("email"); ok {
 		claims.Email, _ = v.(string)
@@ -96,29 +84,6 @@ func ValidateSessionToken(secret []byte, tokenStr string) (*auth.Claims, error) 
 	return claims, nil
 }
 
-// extractGroups reads the "groups" claim, tolerating both []string and
-// []interface{} encodings that different JWT libraries produce.
-func extractGroups(tok jwt.Token) []string {
-	v, ok := tok.Get("groups")
-	if !ok {
-		return nil
-	}
-	switch g := v.(type) {
-	case []string:
-		return g
-	case []interface{}:
-		out := make([]string, 0, len(g))
-		for _, item := range g {
-			if s, ok := item.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	}
-	return nil
-}
-
-// randomAccessKeyID generates an AWS-style temporary access key: "ASIA" + 16 uppercase hex chars.
 func randomAccessKeyID() (string, error) {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
@@ -127,7 +92,6 @@ func randomAccessKeyID() (string, error) {
 	return "ASIA" + strings.ToUpper(hex.EncodeToString(b)), nil
 }
 
-// randomSecretKey generates a 40-character hex string for the secret access key.
 func randomSecretKey() (string, error) {
 	b := make([]byte, 20)
 	if _, err := rand.Read(b); err != nil {

@@ -1,4 +1,3 @@
-// Package s3 parses incoming HTTP requests into S3 semantics.
 package s3
 
 import (
@@ -7,16 +6,12 @@ import (
 	"strings"
 )
 
-// Action is a typed string identifying the S3 API operation being performed.
-// These values are sent verbatim to OPA as input.action.
 type Action string
 
-// Service-level actions
 const (
 	ActionListBuckets Action = "ListBuckets"
 )
 
-// Bucket-level actions
 const (
 	ActionHeadBucket           Action = "HeadBucket"
 	ActionCreateBucket         Action = "CreateBucket"
@@ -35,7 +30,6 @@ const (
 	ActionDeleteObjects        Action = "DeleteObjects" // POST /bucket?delete
 )
 
-// Object-level actions
 const (
 	ActionGetObject               Action = "GetObject"
 	ActionHeadObject              Action = "HeadObject"
@@ -56,38 +50,32 @@ const (
 	ActionUnknown Action = "Unknown"
 )
 
-// ParsedRequest holds the S3 semantics derived from an HTTP request.
-type ParsedRequest struct {
+type S3ActionRequest struct {
 	Action Action
 	Bucket string
-	Key    string // empty for service- and bucket-level operations
+	Key    string
 }
 
-// Parse maps an HTTP request (plus pre-extracted bucket and key) to a
-// ParsedRequest.  bucket and key should be obtained via ExtractBucketKey.
-func Parse(r *http.Request, bucket, key string) ParsedRequest {
+func Parse(r *http.Request, bucket, key string) S3ActionRequest {
 	q := r.URL.Query()
 	method := r.Method
 
-	// --- Service level (no bucket in path/host) ---
 	if bucket == "" {
 		if method == http.MethodGet {
-			return ParsedRequest{Action: ActionListBuckets}
+			return S3ActionRequest{Action: ActionListBuckets}
 		}
-		return ParsedRequest{Action: ActionUnknown}
+		return S3ActionRequest{Action: ActionUnknown}
 	}
 
-	// --- Object level ---
 	if key != "" {
 		return parseObjectAction(r, method, q, bucket, key)
 	}
 
-	// --- Bucket level ---
-	return parseBucketAction(r, method, q, bucket)
+	return parseBucketAction(method, q, bucket)
 }
 
-func parseBucketAction(r *http.Request, method string, q url.Values, bucket string) ParsedRequest {
-	pr := ParsedRequest{Bucket: bucket}
+func parseBucketAction(method string, q url.Values, bucket string) S3ActionRequest {
+	pr := S3ActionRequest{Bucket: bucket}
 
 	switch method {
 	case http.MethodHead:
@@ -145,8 +133,8 @@ func parseBucketAction(r *http.Request, method string, q url.Values, bucket stri
 	return pr
 }
 
-func parseObjectAction(r *http.Request, method string, q url.Values, bucket, key string) ParsedRequest {
-	pr := ParsedRequest{Bucket: bucket, Key: key}
+func parseObjectAction(r *http.Request, method string, q url.Values, bucket, key string) S3ActionRequest {
+	pr := S3ActionRequest{Bucket: bucket, Key: key}
 
 	switch method {
 	case http.MethodGet:
@@ -207,28 +195,23 @@ func parseObjectAction(r *http.Request, method string, q url.Values, bucket, key
 
 // ExtractBucketKey extracts the S3 bucket and object key from an HTTP request,
 // supporting both addressing styles:
-//
-//   - Path-style:          /bucket/key/path   → bucket="bucket", key="key/path"
+//   - Path-style: /bucket/key/path → bucket="bucket", key="key/path"
 //   - Virtual-hosted-style: bucket.proxyHost/key → bucket="bucket", key="key"
-//     (only when proxyHost is non-empty)
 func ExtractBucketKey(r *http.Request, proxyHost string) (bucket, key string) {
 	host := r.Host
 	if host == "" {
 		host = r.URL.Host
 	}
-	// Strip port, handling IPv6 addresses like [::1]:8080
 	if idx := strings.LastIndex(host, ":"); idx > strings.LastIndex(host, "]") {
 		host = host[:idx]
 	}
 
-	// Virtual-hosted-style
 	if proxyHost != "" && strings.HasSuffix(host, "."+proxyHost) {
 		bucket = strings.TrimSuffix(host, "."+proxyHost)
 		key = strings.TrimPrefix(r.URL.Path, "/")
 		return
 	}
 
-	// Path-style: strip leading slash, split on first "/"
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	parts := strings.SplitN(path, "/", 2)
 	bucket = parts[0]

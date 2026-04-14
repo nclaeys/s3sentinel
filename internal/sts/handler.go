@@ -12,7 +12,6 @@ import (
 	"github.com/dataminded/s3sentinel/internal/auth"
 )
 
-// Config holds the STS handler's dependencies.
 type Config struct {
 	JWTValidator *auth.JWTValidator
 	TokenSecret  []byte
@@ -20,10 +19,6 @@ type Config struct {
 	Logger       *slog.Logger
 }
 
-// Handler implements the STS AssumeRoleWithWebIdentity endpoint.
-// It validates an OIDC JWT and issues short-lived AWS-compatible credentials
-// whose SessionToken encodes the principal's identity for stateless validation
-// by the proxy on every subsequent S3 request.
 type Handler struct {
 	jwtValidator *auth.JWTValidator
 	secret       []byte
@@ -31,7 +26,6 @@ type Handler struct {
 	logger       *slog.Logger
 }
 
-// NewHandler creates a new STS Handler.
 func NewHandler(cfg Config) *Handler {
 	return &Handler{
 		jwtValidator: cfg.JWTValidator,
@@ -41,8 +35,6 @@ func NewHandler(cfg Config) *Handler {
 	}
 }
 
-// ServeHTTP handles STS requests. Only POST requests are accepted.
-// The Action is read from the query string or the form body.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeSTSError(w, http.StatusMethodNotAllowed, "InvalidAction", "only POST is supported")
@@ -54,7 +46,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Action may appear in the query string or the form body.
 	action := r.FormValue("Action")
 
 	switch action {
@@ -122,8 +113,6 @@ func (h *Handler) assumeRoleWithWebIdentity(w http.ResponseWriter, r *http.Reque
 		h.logger.Error("sts: failed to encode response", "error", err)
 	}
 }
-
-// --- XML response types -------------------------------------------------------
 
 type assumeRoleWithWebIdentityResponse struct {
 	XMLName          xml.Name            `xml:"AssumeRoleWithWebIdentityResponse"`

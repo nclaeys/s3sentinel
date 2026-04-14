@@ -1,4 +1,3 @@
-// Package opa provides a thin client for the OPA REST API.
 package opa
 
 import (
@@ -41,23 +40,16 @@ type opaRequest struct {
 	Input Input `json:"input"`
 }
 
-// opaResponse models the OPA /v1/data/<path> response.
-// OPA wraps the rule result in a "result" field.
 type opaResponse struct {
 	Result bool `json:"result"`
 }
 
-// Client calls the OPA REST API to evaluate a policy rule.
 type Client struct {
 	endpoint  string
 	healthURL string // derived from endpoint: scheme://host/health
 	http      *http.Client
 }
 
-// NewClient creates an OPA client.
-// endpoint must be the full URL to the rule, e.g.:
-//
-//	http://opa:8181/v1/data/s3/allow
 func NewClient(endpoint string) *Client {
 	healthURL := ""
 	if u, err := url.Parse(endpoint); err == nil {
@@ -72,8 +64,6 @@ func NewClient(endpoint string) *Client {
 	}
 }
 
-// Check calls OPA's built-in /health endpoint.
-// It satisfies observability.Checker and is used by the readiness handler.
 func (c *Client) Check(ctx context.Context) error {
 	if c.healthURL == "" {
 		return fmt.Errorf("could not derive OPA health URL from endpoint %q", c.endpoint)
@@ -93,7 +83,7 @@ func (c *Client) Check(ctx context.Context) error {
 	return nil
 }
 
-// Allow posts input to OPA and returns true iff the policy evaluates to true.
+// Allow posts input to OPA and returns true if the policy evaluates to true.
 // A network error or an unexpected OPA status code is returned as an error,
 // which the caller should treat as a temporary failure (500), not a deny (403).
 func (c *Client) Allow(ctx context.Context, input Input) (bool, error) {
