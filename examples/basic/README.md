@@ -64,7 +64,6 @@ Fetch an access token for each user from Keycloak:
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST \
   http://localhost:8180/realms/s3sentinel/protocol/openid-connect/token \
-  -d grant_type=client_credentials \
   -d client_id=s3sentinel \
   -d username=admin \
   -d password=admin123 \
@@ -73,7 +72,6 @@ ADMIN_TOKEN=$(curl -s -X POST \
 
 READER_TOKEN=$(curl -s -X POST \
   http://localhost:8180/realms/s3sentinel/protocol/openid-connect/token \
-  -d grant_type=client_credentials \
   -d client_id=s3sentinel \
   -d username=reader \
   -d password=reader123 \
@@ -95,10 +93,9 @@ echo $READER_TOKEN | cut -c1-20
 ```bash
 echo "quarterly sales data" > /tmp/report.csv
 
-curl -s -X PUT http://localhost:8080/example-bucket/reports/report.csv \
+curl -X PUT http://localhost:8080/example-bucket/reports/report.csv \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: text/csv" \
-  --data-binary @/tmp/report.csv
+  --upload-file /tmp/report.csv
 
 echo "exit code: $?"   # 0 = success
 ```

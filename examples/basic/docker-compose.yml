@@ -2,8 +2,6 @@ services:
 
   # ── MinIO (local S3 backend) ──────────────────────────────────────────────
   minio:
-    networks:
-      s3sentinel_net:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
@@ -21,8 +19,6 @@ services:
   # Create the example bucket and seed a test object on first start.
   minio-init:
     image: minio/mc:latest
-    networks:
-      s3sentinel_net:
     depends_on:
       minio:
         condition: service_healthy
@@ -47,8 +43,6 @@ services:
       - "8180:8080"  # http://localhost:8080
     volumes:
       - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
-    networks:
-      s3sentinel_net:
     healthcheck:
       test: ["CMD-SHELL", 'exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e "GET /realms/s3sentinel/.well-known/openid-configuration HTTP/1.0\r\nhost: 127.0.0.1:8080\r\n\r\n" >&3 && grep -q "jwks_uri" <&3']
       interval: 5s
@@ -66,8 +60,6 @@ services:
       - ./policy:/policies
     ports:
       - "8181:8181"
-    networks:
-      s3sentinel_net:
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8181/health"]
       interval: 5s
@@ -78,8 +70,6 @@ services:
   # ── s3sentinel (proxy + STS) ───────────────────────────────────────────────
   # Build context points at the project root (two levels up from this file).
   s3sentinel:
-    networks:
-      s3sentinel_net:
     build:
       context: ../..
       dockerfile: Dockerfile
@@ -116,5 +106,3 @@ services:
         condition: service_healthy
       opa:
         condition: service_healthy
-networks:
-  s3sentinel_net:

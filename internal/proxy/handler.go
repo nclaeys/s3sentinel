@@ -2,7 +2,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -228,38 +231,36 @@ func (h *Handler) forward(ctx context.Context, w http.ResponseWriter, r *http.Re
 	target.Path = r.URL.Path
 	target.RawQuery = r.URL.RawQuery
 
-	outReq, err := http.NewRequestWithContext(ctx, r.Method, target.String(), r.Body)
+	// Compute the SHA-256 payload hash required by SigV4.
+	// For bodyless requests (GET, HEAD, DELETE) this is the well-known
+	// empty-string digest. For requests with a body (PUT, POST) we buffer
+	// into memory so the bytes can be forwarded after signing.
+	payloadHash, body, contentLength, err := readBodyHash(r.Body)
+	if err != nil {
+		writeS3Error(w, http.StatusInternalServerError, "InternalError", "failed to hash request body")
+		return fmt.Errorf("hash body: %w", err)
+	}
+
+	outReq, err := http.NewRequestWithContext(ctx, r.Method, target.String(), body)
 	if err != nil {
 		writeS3Error(w, http.StatusInternalServerError, "InternalError", "failed to build backend request")
 		return fmt.Errorf("build backend request: %w", err)
 	}
+	outReq.ContentLength = contentLength
 
-	// Copy safe headers; drop all client-supplied auth material.
+	// Copy safe headers; drop all client-supplied auth/signing material and
+	// the client Host (we set outReq.Host explicitly below).
 	for k, vv := range r.Header {
-		if isDroppedHeader(k) {
-			continue
+		if !isDroppedHeader(k) {
+			outReq.Header[k] = vv
 		}
-		outReq.Header[k] = vv
 	}
 
 	// The backend expects its own hostname in Host.
 	outReq.Host = h.backendURL.Host
 
 	// Re-sign with the backend service-account credentials.
-	//
-	// "UNSIGNED-PAYLOAD" avoids buffering the entire request body for SHA-256
-	// hashing, which is critical for large PutObject uploads.  All major
-	// Ceph-based EU S3 providers (OVH, Scaleway, Exoscale, Hetzner) accept
-	// this value; it is part of the AWS S3 specification for streaming uploads.
-	if err := h.signer.SignHTTP(
-		ctx,
-		h.credentials,
-		outReq,
-		"UNSIGNED-PAYLOAD",
-		"s3",
-		h.cfg.BackendRegion,
-		time.Now(),
-	); err != nil {
+	if err := h.signer.SignHTTP(ctx, h.credentials, outReq, payloadHash, "s3", h.cfg.BackendRegion, time.Now()); err != nil {
 		writeS3Error(w, http.StatusInternalServerError, "InternalError", "request signing failed")
 		return fmt.Errorf("sign backend request: %w", err)
 	}
@@ -313,19 +314,45 @@ func extractAuth(r *http.Request) (rawToken, sessionToken string, err error) {
 }
 
 // droppedHeaders lists canonical header names that must never be forwarded to
-// the backend.  The SigV4 signer will add fresh values for the auth ones.
+// the backend.  The SigV4 signer will add fresh values for the auth/date ones.
 var droppedHeaders = map[string]bool{
 	"Authorization":        true,
 	"X-Amz-Security-Token": true,
 	"X-Auth-Token":         true,
 	// The signer writes a fresh x-amz-date; stale client values must be removed.
 	"X-Amz-Date": true,
-	// We use UNSIGNED-PAYLOAD; client-supplied hash values are irrelevant.
+	// We compute the payload hash; stale client values must be removed.
 	"X-Amz-Content-Sha256": true,
+	// Host is set explicitly on outReq.Host; the header value from the client
+	// points to the proxy and must not be forwarded.
+	"Host": true,
+	// Content-Length is set via outReq.ContentLength; the header copy would
+	// create a duplicate that some S3 implementations reject.
+	"Content-Length": true,
 }
 
 func isDroppedHeader(key string) bool {
 	return droppedHeaders[http.CanonicalHeaderKey(key)]
+}
+
+// emptyBodyHash is the lowercase hex-encoded SHA-256 digest of the empty string.
+// SigV4 requires this value for requests that carry no body (GET, HEAD, DELETE).
+const emptyBodyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// readBodyHash drains body, computes its SHA-256 hex digest, and returns a new
+// reader over the same bytes so they can still be sent to the backend.
+// When body is nil (bodyless requests), it returns emptyBodyHash and a nil reader.
+func readBodyHash(body io.ReadCloser) (hash string, r io.Reader, contentLength int64, err error) {
+	if body == nil || body == http.NoBody {
+		return emptyBodyHash, nil, 0, nil
+	}
+	defer body.Close()
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), bytes.NewReader(data), int64(len(data)), nil
 }
 
 // writeS3Error writes a minimal S3-compatible XML error response.
