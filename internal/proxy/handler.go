@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,9 +26,9 @@ import (
 	"github.com/dataminded/s3sentinel/internal/sts"
 )
 
-// Config holds the proxy handler's dependencies and runtime settings.
+const emptyBodyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 type Config struct {
-	// Backend S3 service
 	BackendEndpoint string // e.g. https://s3.gra.io.cloud.ovh.net
 	BackendRegion   string // e.g. gra
 	BackendKey      string // service-account access key
@@ -47,10 +48,6 @@ type Config struct {
 	// and the proxy only accepts Bearer / X-Auth-Token JWTs.
 	STSTokenSecret []byte
 }
-
-// Handler is the main http.Handler implementing the proxy pipeline:
-//
-//	Extract JWT → Validate → Parse S3 action → OPA check → Re-sign → Forward
 type Handler struct {
 	cfg         Config
 	backendURL  *url.URL
@@ -59,7 +56,6 @@ type Handler struct {
 	httpClient  *http.Client
 }
 
-// NewHandler constructs a Handler. Panics if BackendEndpoint is not a valid URL.
 func NewHandler(cfg Config) *Handler {
 	backendURL, err := url.Parse(cfg.BackendEndpoint)
 	if err != nil {
@@ -81,22 +77,18 @@ func NewHandler(cfg Config) *Handler {
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
-				// Preserve upstream response encoding; do not add Accept-Encoding.
-				DisableCompression: true,
+				DisableCompression:    true,
 			},
 		},
 	}
 }
 
-// ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	start := time.Now()
 
-	// Wrap the writer so we can capture the status code for metrics.
 	rw := &responseRecorder{ResponseWriter: w}
 
-	// action is set once S3 parsing is done; used by the deferred metric.
 	action := string(s3.ActionUnknown)
 
 	defer func() {
@@ -106,7 +98,60 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Metrics.RequestDuration.WithLabelValues(action).Observe(duration)
 	}()
 
-	// ── 1. Authentication ────────────────────────────────────────────────────
+	claims, err := h.handleAuthentication(ctx, r)
+	if err != nil {
+		_ = writeS3Error(rw, http.StatusUnauthorized, "InvalidToken", fmt.Sprintf("failed to process the provided token due to %s", err.Error()))
+		return
+	}
+
+	bucket, key := s3.ExtractBucketKey(r, h.cfg.ProxyHost)
+	s3Request := s3.Parse(r, bucket, key)
+	action = string(s3Request.Action)
+
+	err = h.authorizeRequest(ctx, claims, s3Request, rw)
+	if err != nil {
+		return
+	}
+
+	if err := h.forward(ctx, rw, r); err != nil {
+		h.cfg.Logger.Error("proxy: forward error", "error", err, "request", r.URL, "principal", claims.Subject)
+	}
+}
+
+func (h *Handler) authorizeRequest(ctx context.Context, claims *auth.Claims, s3Request s3.ParsedRequest, rw *responseRecorder) error {
+	log := h.cfg.Logger.With(
+		"principal", claims.Subject,
+		"action", s3Request.Action,
+		"bucket", s3Request.Bucket,
+		"key", s3Request.Key,
+	)
+
+	opaStart := time.Now()
+	allowed, err := h.cfg.OPAClient.Allow(ctx, opa.Input{
+		Principal: claims.Subject,
+		Email:     claims.Email,
+		Groups:    claims.Groups,
+		Action:    string(s3Request.Action),
+		Bucket:    s3Request.Bucket,
+		Key:       s3Request.Key,
+	})
+	h.cfg.Metrics.OPAEvaluationDuration.Observe(time.Since(opaStart).Seconds())
+
+	if err != nil {
+		h.cfg.Metrics.OPAEvaluationsTotal.WithLabelValues("error").Inc()
+		log.Error("opa: check failed", "error", err)
+		return writeS3Error(rw, http.StatusInternalServerError, "InternalError", "authorisation check failed")
+	}
+	if !allowed {
+		h.cfg.Metrics.OPAEvaluationsTotal.WithLabelValues("deny").Inc()
+		log.Info("opa: denied")
+		return writeS3Error(rw, http.StatusForbidden, "AccessDenied", "access denied by policy")
+	}
+	h.cfg.Metrics.OPAEvaluationsTotal.WithLabelValues("allow").Inc()
+	return nil
+}
+
+func (h *Handler) handleAuthentication(ctx context.Context, r *http.Request) (*auth.Claims, error) {
 	rawToken, sessionToken, err := extractAuth(r)
 	if err != nil {
 		h.cfg.Logger.Warn("auth: missing credentials",
@@ -114,79 +159,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"method", r.Method,
 			"path", r.URL.Path,
 		)
-		writeS3Error(rw, http.StatusUnauthorized, "InvalidToken", "bearer token or STS session token required")
-		return
+		return nil, err
 	}
 
-	claims, err := h.getClaims(sessionToken, r, rw, ctx, rawToken)
-	if err != nil {
-		h.cfg.Logger.Warn("auth: failed to extract claims from token",
-			"remote", r.RemoteAddr,
-			"method", r.Method,
-			"path", r.URL.Path,
-			"error", err,
-		)
-		writeS3Error(rw, http.StatusUnauthorized, "InvalidToken", "failed to get claims from token")
-		return
-	}
-	h.cfg.Metrics.JWTValidationsTotal.WithLabelValues("success").Inc()
-
-	// ── 2. Parse S3 semantics ────────────────────────────────────────────────
-	bucket, key := s3.ExtractBucketKey(r, h.cfg.ProxyHost)
-	parsed := s3.Parse(r, bucket, key)
-	action = string(parsed.Action) // now available to the deferred metric
-
-	log := h.cfg.Logger.With(
-		"principal", claims.Subject,
-		"action", parsed.Action,
-		"bucket", parsed.Bucket,
-		"key", parsed.Key,
-	)
-
-	// ── 3. Authorisation (OPA) ───────────────────────────────────────────────
-	opaStart := time.Now()
-	allowed, err := h.cfg.OPAClient.Allow(ctx, opa.Input{
-		Principal: claims.Subject,
-		Email:     claims.Email,
-		Groups:    claims.Groups,
-		Action:    string(parsed.Action),
-		Bucket:    parsed.Bucket,
-		Key:       parsed.Key,
-	})
-	h.cfg.Metrics.OPAEvaluationDuration.Observe(time.Since(opaStart).Seconds())
-
-	if err != nil {
-		h.cfg.Metrics.OPAEvaluationsTotal.WithLabelValues("error").Inc()
-		log.Error("opa: check failed", "error", err)
-		writeS3Error(rw, http.StatusInternalServerError, "InternalError", "authorisation check failed")
-		return
-	}
-	if !allowed {
-		h.cfg.Metrics.OPAEvaluationsTotal.WithLabelValues("deny").Inc()
-		log.Info("opa: denied")
-		writeS3Error(rw, http.StatusForbidden, "AccessDenied", "access denied by policy")
-		return
-	}
-	h.cfg.Metrics.OPAEvaluationsTotal.WithLabelValues("allow").Inc()
-
-	log.Info("proxy: forwarding")
-
-	// ── 4. Forward ───────────────────────────────────────────────────────────
-	if err := h.forward(ctx, rw, r); err != nil {
-		// Response headers may already be written; just log.
-		log.Error("proxy: forward error", "error", err)
-	}
-}
-
-func (h *Handler) getClaims(sessionToken string, r *http.Request, rw *responseRecorder, ctx context.Context, rawToken string) (*auth.Claims, error) {
 	if sessionToken != "" {
-		return h.processStsTokenFlow(r, rw, sessionToken)
+		return h.processStsTokenFlow(r, sessionToken)
 	}
-	return h.ProcessJwtTokenFlow(ctx, rawToken, r, rw)
+	return h.ProcessDirectJwtTokenFlow(ctx, rawToken, r)
 }
 
-func (h *Handler) ProcessJwtTokenFlow(ctx context.Context, rawToken string, r *http.Request, rw *responseRecorder) (*auth.Claims, error) {
-	// Direct JWT flow: client passes an OIDC JWT as Bearer or X-Auth-Token.
+func (h *Handler) ProcessDirectJwtTokenFlow(ctx context.Context, rawToken string, r *http.Request) (*auth.Claims, error) {
 	claims, err := h.cfg.JWTValidator.Validate(ctx, rawToken)
 	if err != nil {
 		h.cfg.Logger.Warn("auth: JWT validation failed",
@@ -194,21 +176,18 @@ func (h *Handler) ProcessJwtTokenFlow(ctx context.Context, rawToken string, r *h
 			"error", err,
 		)
 		h.cfg.Metrics.JWTValidationsTotal.WithLabelValues("error").Inc()
-		writeS3Error(rw, http.StatusUnauthorized, "InvalidToken", "JWT validation failed")
-		return nil, nil
+		return nil, err
 	}
+	h.cfg.Metrics.JWTValidationsTotal.WithLabelValues("success").Inc()
 	return claims, err
 }
 
-func (h *Handler) processStsTokenFlow(r *http.Request, rw *responseRecorder, sessionToken string) (*auth.Claims, error) {
-	// STS flow: client exchanged an OIDC JWT for temporary credentials via
-	// the STS endpoint; the SessionToken carries the identity as a signed JWT.
+func (h *Handler) processStsTokenFlow(r *http.Request, sessionToken string) (*auth.Claims, error) {
 	if len(h.cfg.STSTokenSecret) == 0 {
 		h.cfg.Logger.Warn("auth: session token presented but STS is not configured",
 			"remote", r.RemoteAddr,
 		)
-		writeS3Error(rw, http.StatusUnauthorized, "InvalidToken", "STS session tokens are not enabled")
-		return nil, nil
+		return nil, errors.New("STS session tokens are not enabled")
 	}
 	claims, err := sts.ValidateSessionToken(h.cfg.STSTokenSecret, sessionToken)
 	if err != nil {
@@ -217,65 +196,59 @@ func (h *Handler) processStsTokenFlow(r *http.Request, rw *responseRecorder, ses
 			"error", err,
 		)
 		h.cfg.Metrics.JWTValidationsTotal.WithLabelValues("error").Inc()
-		writeS3Error(rw, http.StatusUnauthorized, "InvalidToken", "session token validation failed")
-		return nil, nil
+		return nil, err
 	}
-	return claims, err
+	h.cfg.Metrics.JWTValidationsTotal.WithLabelValues("success").Inc()
+	return claims, nil
 }
 
-// forward re-signs the request with the backend service-account credentials
-// and streams the response back to the client.
+// forward re-signs the request with the backend blob storage credentials credentials
+// and returnse the response back to the client.
 func (h *Handler) forward(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	// Build the backend target URL, preserving path and query string.
 	target := *h.backendURL
 	target.Path = r.URL.Path
 	target.RawQuery = r.URL.RawQuery
+	target.RawPath = r.URL.EscapedPath()
 
-	// Compute the SHA-256 payload hash required by SigV4.
-	// For bodyless requests (GET, HEAD, DELETE) this is the well-known
-	// empty-string digest. For requests with a body (PUT, POST) we buffer
-	// into memory so the bytes can be forwarded after signing.
-	payloadHash, body, contentLength, err := readBodyHash(r.Body)
+	payloadHash, body, contentLength, err := resolvePayloadHash(r)
 	if err != nil {
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "failed to hash request body")
-		return fmt.Errorf("hash body: %w", err)
+		return writeS3Error(w, http.StatusInternalServerError, "InternalError", "failed to hash request body")
 	}
 
 	outReq, err := http.NewRequestWithContext(ctx, r.Method, target.String(), body)
 	if err != nil {
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "failed to build backend request")
-		return fmt.Errorf("build backend request: %w", err)
+		return writeS3Error(w, http.StatusInternalServerError, "InternalError", "failed to build backend request")
 	}
 	outReq.ContentLength = contentLength
+	outReq.Host = h.backendURL.Host
+	outReq.Header.Set("Host", h.backendURL.Host)
+	outReq.Header.Set("Content-Length", strconv.Itoa(int(contentLength)))
+	outReq.Header.Set("X-Amz-Content-Sha256", payloadHash)
 
-	// Copy safe headers; drop all client-supplied auth/signing material and
-	// the client Host (we set outReq.Host explicitly below).
+	// Copy safe headers; drop all client-supplied auth/signing material as that should be redone
+	// This is needed because we need to keep request in tact, no manipulation after signing.
 	for k, vv := range r.Header {
 		if !isDroppedHeader(k) {
 			outReq.Header[k] = vv
 		}
 	}
 
-	// The backend expects its own hostname in Host.
-	outReq.Host = h.backendURL.Host
-
-	// Re-sign with the backend service-account credentials.
 	if err := h.signer.SignHTTP(ctx, h.credentials, outReq, payloadHash, "s3", h.cfg.BackendRegion, time.Now()); err != nil {
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "request signing failed")
-		return fmt.Errorf("sign backend request: %w", err)
+		return writeS3Error(w, http.StatusInternalServerError, "InternalError", "request signing failed")
 	}
+
+	h.cfg.Logger.Debug("Forwarding request", "remote", r.RemoteAddr, "method", outReq.Method, "url", outReq.URL.String())
+	h.cfg.Logger.Debug("forwarding request headers", "headers", outReq.Header)
 
 	resp, err := h.httpClient.Do(outReq)
 	if err != nil {
-		writeS3Error(w, http.StatusBadGateway, "ServiceUnavailable", "backend unreachable")
 		h.cfg.Metrics.BackendRequestsTotal.WithLabelValues("502").Inc()
-		return fmt.Errorf("backend request: %w", err)
+		return writeS3Error(w, http.StatusBadGateway, "ServiceUnavailable", "backend unreachable")
 	}
 	defer resp.Body.Close()
 
 	h.cfg.Metrics.BackendRequestsTotal.WithLabelValues(strconv.Itoa(resp.StatusCode)).Inc()
 
-	// Stream response headers + body back to the client.
 	for k, vv := range resp.Header {
 		for _, v := range vv {
 			w.Header().Add(k, v)
@@ -288,8 +261,8 @@ func (h *Handler) forward(ctx context.Context, w http.ResponseWriter, r *http.Re
 
 // extractAuth returns the raw JWT or STS session token from the request.
 // Precedence (first match wins):
-//  1. Authorization: Bearer <token>     – standard OIDC / direct API use
-//  2. X-Auth-Token: <token>             – S3 SDK compatibility: client uses fake
+//  1. Authorization: Bearer <token>: standard OIDC / direct API use
+//  2. X-Auth-Token: <token>: S3 SDK compatibility: client uses fake
 //     AWS credentials for SDK signing, but passes the real OIDC JWT here.
 //  3. Authorization: AWS4-HMAC-SHA256 + X-Amz-Security-Token  – STS flow: client
 //     exchanged its OIDC JWT for temporary credentials via the STS endpoint.
@@ -313,21 +286,17 @@ func extractAuth(r *http.Request) (rawToken, sessionToken string, err error) {
 	return "", "", fmt.Errorf("no bearer token in Authorization or X-Auth-Token")
 }
 
-// droppedHeaders lists canonical header names that must never be forwarded to
-// the backend.  The SigV4 signer will add fresh values for the auth/date ones.
+// droppedHeaders remove all headers related to authentication and signing of initial request
+// because we will resign the request with the backend blob storage credentials
 var droppedHeaders = map[string]bool{
 	"Authorization":        true,
 	"X-Amz-Security-Token": true,
 	"X-Auth-Token":         true,
-	// The signer writes a fresh x-amz-date; stale client values must be removed.
-	"X-Amz-Date": true,
-	// We compute the payload hash; stale client values must be removed.
+	"X-Amz-Date":           true,
 	"X-Amz-Content-Sha256": true,
-	// Host is set explicitly on outReq.Host; the header value from the client
-	// points to the proxy and must not be forwarded.
-	"Host": true,
-	// Content-Length is set via outReq.ContentLength; the header copy would
-	// create a duplicate that some S3 implementations reject.
+
+	// Host is set explicitly via outReq.Host; the client value points to the proxy, not the backend.
+	"Host":           true,
 	"Content-Length": true,
 }
 
@@ -335,40 +304,54 @@ func isDroppedHeader(key string) bool {
 	return droppedHeaders[http.CanonicalHeaderKey(key)]
 }
 
-// emptyBodyHash is the lowercase hex-encoded SHA-256 digest of the empty string.
-// SigV4 requires this value for requests that carry no body (GET, HEAD, DELETE).
-const emptyBodyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+// resolvePayloadHash determines the SigV4 payload hash to use when re-signing
+// and, when necessary, buffers the body so the bytes can still be forwarded.
+//
+// Hash selection:
+//   - Presigned URL (X-Amz-Signature in query string) → UNSIGNED-PAYLOAD, no buffering
+//   - Client signals streaming or explicitly unsigned   → UNSIGNED-PAYLOAD, no buffering
+//   - No body (GET, HEAD, DELETE …)                   → SHA-256 of empty string
+//   - Regular request with body                         → buffer body, compute SHA-256
+func resolvePayloadHash(r *http.Request) (hash string, body io.Reader, contentLength int64, err error) {
+	// Presigned URL: the signature travels in the query string, not the
+	// Authorization header. AWS and MinIO always accept UNSIGNED-PAYLOAD here.
+	if r.URL.Query().Get("X-Amz-Signature") != "" {
+		return "UNSIGNED-PAYLOAD", r.Body, r.ContentLength, nil
+	}
 
-// readBodyHash drains body, computes its SHA-256 hex digest, and returns a new
-// reader over the same bytes so they can still be sent to the backend.
-// When body is nil (bodyless requests), it returns emptyBodyHash and a nil reader.
-func readBodyHash(body io.ReadCloser) (hash string, r io.Reader, contentLength int64, err error) {
-	if body == nil || body == http.NoBody {
+	switch r.Header.Get("X-Amz-Content-Sha256") {
+	case "UNSIGNED-PAYLOAD",
+		"STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+		"STREAMING-UNSIGNED-PAYLOAD-TRAILER":
+		return "UNSIGNED-PAYLOAD", r.Body, r.ContentLength, nil
+	}
+
+	if r.Body == nil || r.Body == http.NoBody {
 		return emptyBodyHash, nil, 0, nil
 	}
-	defer body.Close()
-	data, err := io.ReadAll(body)
-	if err != nil {
-		return "", nil, 0, err
+
+	data, readErr := io.ReadAll(r.Body)
+	r.Body.Close()
+	if readErr != nil {
+		return "", nil, 0, readErr
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), bytes.NewReader(data), int64(len(data)), nil
 }
 
-// writeS3Error writes a minimal S3-compatible XML error response.
-// S3 clients expect this format even for non-2xx HTTP status codes.
-func writeS3Error(w http.ResponseWriter, status int, code, message string) {
+func writeS3Error(w http.ResponseWriter, status int, code, message string) error {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(status)
-	fmt.Fprintf(w,
+	_, err := fmt.Fprintf(w,
 		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>%s</Code><Message>%s</Message></Error>",
 		code, message,
 	)
+	if err != nil {
+		return errors.New("failed to write S3 error as a response: " + err.Error())
+	}
+	return nil
 }
 
-// responseRecorder wraps http.ResponseWriter to capture the HTTP status code
-// written to the client, which is needed for request metrics.
-// It also forwards the http.Flusher interface so streaming responses work.
 type responseRecorder struct {
 	http.ResponseWriter
 	code    int
@@ -391,7 +374,6 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
-// statusCode returns the recorded status, defaulting to 200 if nothing was written.
 func (r *responseRecorder) statusCode() int {
 	if !r.written {
 		return http.StatusOK
@@ -399,7 +381,6 @@ func (r *responseRecorder) statusCode() int {
 	return r.code
 }
 
-// Flush forwards to the underlying ResponseWriter if it supports flushing.
 func (r *responseRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()

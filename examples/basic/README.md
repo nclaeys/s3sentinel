@@ -93,7 +93,8 @@ echo $READER_TOKEN | cut -c1-20
 ```bash
 echo "quarterly sales data" > /tmp/report.csv
 
-curl -X PUT http://localhost:8080/example-bucket/reports/report.csv \
+curl -s -o /dev/null -w "%{http_code}" \
+  -X PUT http://localhost:8080/example-bucket/reports/report.csv \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   --upload-file /tmp/report.csv
 
@@ -114,7 +115,6 @@ curl -s "http://localhost:8080/example-bucket?list-type=2&prefix=reports/" \
 ```bash
 curl -s http://localhost:8080/example-bucket/reports/report.csv \
   -H "Authorization: Bearer $READER_TOKEN"
-# quarterly sales data
 ```
 
 ---
@@ -122,11 +122,12 @@ curl -s http://localhost:8080/example-bucket/reports/report.csv \
 ### Step 4 — reader is blocked from uploading
 
 ```bash
+echo "This is not allowed" > /tmp/malicious.csv
+
 curl -s -o /dev/null -w "%{http_code}" \
   -X PUT http://localhost:8080/example-bucket/reports/malicious.csv \
   -H "Authorization: Bearer $READER_TOKEN" \
-  -H "Content-Type: text/csv" \
-  --data-binary "this should not be allowed"
+  --upload-file /tmp/malicious.csv
 # 403
 ```
 
