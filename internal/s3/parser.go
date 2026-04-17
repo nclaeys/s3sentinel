@@ -50,21 +50,23 @@ const (
 	ActionUnknown Action = "Unknown"
 )
 
-type S3ActionRequest struct {
+type S3RequestContext struct {
 	Action Action
 	Bucket string
 	Key    string
 }
 
-func Parse(r *http.Request, bucket, key string) S3ActionRequest {
+func Parse(r *http.Request, proxyHost string) S3RequestContext {
+	bucket, key := ExtractBucketAndKey(r, proxyHost)
+
 	q := r.URL.Query()
 	method := r.Method
 
 	if bucket == "" {
 		if method == http.MethodGet {
-			return S3ActionRequest{Action: ActionListBuckets}
+			return S3RequestContext{Action: ActionListBuckets}
 		}
-		return S3ActionRequest{Action: ActionUnknown}
+		return S3RequestContext{Action: ActionUnknown}
 	}
 
 	if key != "" {
@@ -74,8 +76,8 @@ func Parse(r *http.Request, bucket, key string) S3ActionRequest {
 	return parseBucketAction(method, q, bucket)
 }
 
-func parseBucketAction(method string, q url.Values, bucket string) S3ActionRequest {
-	pr := S3ActionRequest{Bucket: bucket}
+func parseBucketAction(method string, q url.Values, bucket string) S3RequestContext {
+	pr := S3RequestContext{Bucket: bucket}
 
 	switch method {
 	case http.MethodHead:
@@ -133,8 +135,8 @@ func parseBucketAction(method string, q url.Values, bucket string) S3ActionReque
 	return pr
 }
 
-func parseObjectAction(r *http.Request, method string, q url.Values, bucket, key string) S3ActionRequest {
-	pr := S3ActionRequest{Bucket: bucket, Key: key}
+func parseObjectAction(r *http.Request, method string, q url.Values, bucket, key string) S3RequestContext {
+	pr := S3RequestContext{Bucket: bucket, Key: key}
 
 	switch method {
 	case http.MethodGet:
@@ -193,11 +195,11 @@ func parseObjectAction(r *http.Request, method string, q url.Values, bucket, key
 	return pr
 }
 
-// ExtractBucketKey extracts the S3 bucket and object key from an HTTP request,
+// ExtractBucketAndKey extracts the S3 bucket and object key from an HTTP request,
 // supporting both addressing styles:
 //   - Path-style: /bucket/key/path → bucket="bucket", key="key/path"
 //   - Virtual-hosted-style: bucket.proxyHost/key → bucket="bucket", key="key"
-func ExtractBucketKey(r *http.Request, proxyHost string) (bucket, key string) {
+func ExtractBucketAndKey(r *http.Request, proxyHost string) (bucket, key string) {
 	host := r.Host
 	if host == "" {
 		host = r.URL.Host
