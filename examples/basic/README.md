@@ -138,86 +138,6 @@ The proxy returns `403 AccessDenied`. The `PutObject` action is not in the reade
 ## Same scenario using STS credentials (boto3)
 
 The STS flow exchanges the OIDC token for short-lived AWS-compatible credentials. After the exchange, boto3 works with no custom headers.
-
-```python
-import boto3
-from botocore.exceptions import ClientError
-import urllib.request, urllib.parse, json
-
-KEYCLOAK = "http://localhost:8180/realms/s3sentinel/protocol/openid-connect/token"
-PROXY     = "http://localhost:8080"
-STS       = "http://localhost:8090"
-
-
-def get_token(username, password):
-    data = urllib.parse.urlencode({
-        "grant_type": "password",
-        "client_id":  "s3sentinel",
-        "username":   username,
-        "password":   password,
-    }).encode()
-    with urllib.request.urlopen(KEYCLOAK, data) as r:
-        return json.load(r)["access_token"]
-
-
-def assume_role(token):
-    """Exchange an OIDC token for temporary S3 credentials via STS."""
-    sts = boto3.client(
-        "sts",
-        endpoint_url=STS,
-        aws_access_key_id="placeholder",
-        aws_secret_access_key="placeholder",
-        region_name="us-east-1",
-    )
-    resp = sts.assume_role_with_web_identity(
-        RoleArn="arn:aws:iam::000000000000:role/s3sentinel",
-        RoleSessionName="example",
-        WebIdentityToken=token,
-    )
-    return resp["Credentials"]
-
-
-def s3_client(creds):
-    return boto3.client(
-        "s3",
-        endpoint_url=PROXY,
-        aws_access_key_id=creds["AccessKeyId"],
-        aws_secret_access_key=creds["SecretAccessKey"],
-        aws_session_token=creds["SessionToken"],
-        region_name="us-east-1",
-    )
-
-
-# ── Admin: upload a file ──────────────────────────────────────────────────────
-admin_creds = assume_role(get_token("admin", "admin123"))
-admin_s3    = s3_client(admin_creds)
-
-admin_s3.put_object(
-    Bucket="example-bucket",
-    Key="reports/report.csv",
-    Body=b"quarterly sales data",
-)
-print("admin upload: OK")
-
-# ── Reader: download the file ─────────────────────────────────────────────────
-reader_creds = assume_role(get_token("reader", "reader123"))
-reader_s3    = s3_client(reader_creds)
-
-obj = reader_s3.get_object(Bucket="example-bucket", Key="reports/report.csv")
-print("reader download:", obj["Body"].read().decode())
-
-# ── Reader: upload blocked ────────────────────────────────────────────────────
-try:
-    reader_s3.put_object(
-        Bucket="example-bucket",
-        Key="reports/malicious.csv",
-        Body=b"this should not be allowed",
-    )
-    print("reader upload: ERROR — should have been denied")
-except ClientError as e:
-    print("reader upload blocked:", e.response["Error"]["Code"])  # AccessDenied
-```
-
 Run it:
 
 ```bash
@@ -225,6 +145,14 @@ python3 examples/basic/demo.py
 # admin upload: OK
 # reader download: quarterly sales data
 # reader upload blocked: AccessDenied
+```
+## Using duckdb to query a parquet file on S3
+
+You can also use DuckDB to query the Parquet file directly from S3 using the STS credentials:
+Run it:
+
+```bash
+python3 examples/basic/demo_duckdb.py
 ```
 
 ---
@@ -267,14 +195,14 @@ Example output:
 }
 ```
 
-| Claim | Meaning |
-|---|---|
-| `iss` | Always `s3sentinel-sts` — distinguishes these tokens from OIDC tokens |
-| `sub` | The user's identity sent to OPA as `input.principal` |
-| `email` | The user's email sent to OPA as `input.email` |
-| `groups` | The user's group memberships sent to OPA as `input.groups` |
-| `iat` | Issued-at time (Unix timestamp) |
-| `exp` | Expiry time — after this the proxy rejects the token with `401` |
+| Claim    | Meaning                                                               |
+|----------|-----------------------------------------------------------------------|
+| `iss`    | Always `s3sentinel-sts` — distinguishes these tokens from OIDC tokens |
+| `sub`    | The user's identity sent to OPA as `input.principal`                  |
+| `email`  | The user's email sent to OPA as `input.email`                         |
+| `groups` | The user's group memberships sent to OPA as `input.groups`            |
+| `iat`    | Issued-at time (Unix timestamp)                                       |
+| `exp`    | Expiry time — after this the proxy rejects the token with `401`       |
 
 ### Verifying the signature (requires the secret)
 

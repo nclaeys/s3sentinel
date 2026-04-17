@@ -1,6 +1,7 @@
 package sts
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/xml"
@@ -19,8 +20,12 @@ type Config struct {
 	Logger       *slog.Logger
 }
 
+type tokenValidator interface {
+	Validate(ctx context.Context, rawToken string) (*auth.Claims, error)
+}
+
 type Handler struct {
-	jwtValidator *auth.JWTValidator
+	jwtValidator tokenValidator
 	secret       []byte
 	ttl          time.Duration
 	logger       *slog.Logger
@@ -102,7 +107,7 @@ func (h *Handler) assumeRoleWithWebIdentity(r *http.Request) (*assumeRoleWithWeb
 	)
 
 	roleArn := "arn:aws:sts::000000000000:assumed-role/s3sentinel/" + claims.Subject
-	assumedRoleID := "AROAS3SENTINEL:" + claims.Subject
+	assumedRoleID := "3SENTINEL:" + claims.Subject
 
 	resp := assumeRoleWithWebIdentityResponse{
 		Xmlns: "https://sts.amazonaws.com/doc/2011-06-15/",
