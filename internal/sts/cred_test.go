@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/dataminded/s3sentinel/internal/auth"
 )
 
@@ -20,15 +22,13 @@ func testClaims() *auth.Claims {
 
 func TestIssueCredentials_CredentialFormat(t *testing.T) {
 	creds, err := IssueCredentials(testSecret, testClaims(), time.Hour)
-	if err != nil {
-		t.Fatalf("IssueCredentials error: %v", err)
-	}
+	assert.NoError(t, err)
 
-	if !strings.HasPrefix(creds.AccessKeyID, "ASIA") {
-		t.Errorf("AccessKeyID %q does not start with ASIA", creds.AccessKeyID)
+	if !strings.HasPrefix(creds.AccessKeyID, "SENTINEL") {
+		t.Errorf("AccessKeyID %q does not start with SENTINEL", creds.AccessKeyID)
 	}
-	if len(creds.AccessKeyID) != 20 {
-		t.Errorf("AccessKeyID length = %d, want 20", len(creds.AccessKeyID))
+	if len(creds.AccessKeyID) != 24 {
+		t.Errorf("AccessKeyID length = %d, want 24", len(creds.AccessKeyID))
 	}
 
 	if len(creds.SecretAccessKey) != 40 {
@@ -45,8 +45,10 @@ func TestIssueCredentials_CredentialFormat(t *testing.T) {
 }
 
 func TestIssueCredentials_UniquePerCall(t *testing.T) {
-	c1, _ := IssueCredentials(testSecret, testClaims(), time.Hour)
-	c2, _ := IssueCredentials(testSecret, testClaims(), time.Hour)
+	c1, err := IssueCredentials(testSecret, testClaims(), time.Hour)
+	assert.NoError(t, err)
+	c2, err2 := IssueCredentials(testSecret, testClaims(), time.Hour)
+	assert.NoError(t, err2)
 
 	if c1.AccessKeyID == c2.AccessKeyID {
 		t.Error("expected unique AccessKeyIDs across calls")
@@ -60,38 +62,19 @@ func TestValidateSessionToken_RoundTrip(t *testing.T) {
 	want := testClaims()
 
 	creds, err := IssueCredentials(testSecret, want, time.Hour)
-	if err != nil {
-		t.Fatalf("IssueCredentials: %v", err)
-	}
-
+	assert.NoError(t, err)
 	got, err := ValidateSessionToken(testSecret, creds.SessionToken)
-	if err != nil {
-		t.Fatalf("ValidateSessionToken: %v", err)
-	}
+	assert.NoError(t, err)
 
-	if got.Subject != want.Subject {
-		t.Errorf("Subject: got %q, want %q", got.Subject, want.Subject)
-	}
-	if got.Email != want.Email {
-		t.Errorf("Email: got %q, want %q", got.Email, want.Email)
-	}
-	if len(got.Groups) != len(want.Groups) {
-		t.Fatalf("Groups length: got %d, want %d", len(got.Groups), len(want.Groups))
-	}
-	for i, g := range want.Groups {
-		if got.Groups[i] != g {
-			t.Errorf("Groups[%d]: got %q, want %q", i, got.Groups[i], g)
-		}
-	}
+	assert.Equal(t, want, got)
 }
 
 func TestValidateSessionToken_WrongSecret(t *testing.T) {
 	creds, _ := IssueCredentials(testSecret, testClaims(), time.Hour)
 
 	_, err := ValidateSessionToken([]byte("different-secret"), creds.SessionToken)
-	if err == nil {
-		t.Error("expected error for wrong secret, got nil")
-	}
+
+	assert.Error(t, err)
 }
 
 func TestValidateSessionToken_Expired(t *testing.T) {
@@ -101,30 +84,24 @@ func TestValidateSessionToken_Expired(t *testing.T) {
 	}
 
 	_, err = ValidateSessionToken(testSecret, creds.SessionToken)
-	if err == nil {
-		t.Error("expected error for expired token, got nil")
-	}
+
+	assert.Error(t, err)
 }
 
 func TestValidateSessionToken_Tampered(t *testing.T) {
 	creds, _ := IssueCredentials(testSecret, testClaims(), time.Hour)
 
 	parts := strings.Split(creds.SessionToken, ".")
-	if len(parts) != 3 {
-		t.Fatalf("session token does not have 3 JWT segments")
-	}
+	assert.Len(t, parts, 3, "session token should have 3 JWT segments")
 	parts[1] = "dGFtcGVyZWQ" // base64url("tampered")
 	tampered := strings.Join(parts, ".")
-
 	_, err := ValidateSessionToken(testSecret, tampered)
-	if err == nil {
-		t.Error("expected error for tampered token, got nil")
-	}
+
+	assert.Error(t, err)
 }
 
 func TestValidateSessionToken_Malformed(t *testing.T) {
 	_, err := ValidateSessionToken(testSecret, "not.a.jwt.at.all")
-	if err == nil {
-		t.Error("expected error for malformed token, got nil")
-	}
+
+	assert.Error(t, err)
 }

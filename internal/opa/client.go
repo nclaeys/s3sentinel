@@ -44,13 +44,18 @@ type opaResponse struct {
 	Result bool `json:"result"`
 }
 
+type OPAClient interface {
+	Check(ctx context.Context) error
+	Allow(ctx context.Context, input Input) (bool, error)
+}
+
 type Client struct {
 	endpoint  string
 	healthURL string // derived from endpoint: scheme://host/health
 	http      *http.Client
 }
 
-func NewClient(endpoint string) *Client {
+func NewClient(endpoint string) OPAClient {
 	healthURL := ""
 	if u, err := url.Parse(endpoint); err == nil {
 		healthURL = u.Scheme + "://" + u.Host + "/health"

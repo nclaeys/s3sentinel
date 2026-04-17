@@ -38,7 +38,7 @@ type Config struct {
 	ProxyHost string
 
 	JWTValidator *auth.JWTValidator
-	OPAClient    *opa.Client
+	OPAClient    opa.OPAClient
 	Metrics      *observability.Metrics
 	Logger       *slog.Logger
 
@@ -138,12 +138,14 @@ func (h *Handler) authorizeRequest(ctx context.Context, claims *auth.Claims, s3R
 	if err != nil {
 		h.cfg.Metrics.OPAEvaluationsTotal.WithLabelValues("error").Inc()
 		log.Error("opa: check failed", "error", err)
-		return writeS3Error(rw, http.StatusInternalServerError, "InternalError", "authorisation check failed")
+		_ = writeS3Error(rw, http.StatusInternalServerError, "InternalError", "authorisation check failed")
+		return errors.New("opa check failed")
 	}
 	if !allowed {
 		h.cfg.Metrics.OPAEvaluationsTotal.WithLabelValues("deny").Inc()
 		log.Info("opa: denied")
-		return writeS3Error(rw, http.StatusForbidden, "AccessDenied", "access denied by policy")
+		_ = writeS3Error(rw, http.StatusForbidden, "AccessDenied", "access denied by policy")
+		return errors.New("access denied")
 	}
 	h.cfg.Metrics.OPAEvaluationsTotal.WithLabelValues("allow").Inc()
 	return nil
