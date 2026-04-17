@@ -50,32 +50,50 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch action {
 	case "AssumeRoleWithWebIdentity":
-		h.assumeRoleWithWebIdentity(w, r)
+
+		response, errorResp := h.assumeRoleWithWebIdentity(r)
+		if errorResp != nil {
+			writeSTSError(w, errorResp.statusCode, errorResp.code, errorResp.message)
+			return
+		}
+		h.writeResponse(w, response)
 	default:
 		writeSTSError(w, http.StatusBadRequest, "InvalidAction",
 			fmt.Sprintf("action %q is not supported; use AssumeRoleWithWebIdentity", action))
 	}
 }
 
-func (h *Handler) assumeRoleWithWebIdentity(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) writeResponse(w http.ResponseWriter, response *assumeRoleWithWebIdentityResponse) {
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	_, err := fmt.Fprint(w, xml.Header)
+	if err != nil {
+		h.logger.Warn("sts: failed to write xml header", "error", err)
+	}
+	encoder := xml.NewEncoder(w)
+	defer encoder.Close()
+	err = encoder.Encode(response)
+	if err != nil {
+		h.logger.Error("sts: failed to encode response", "error", err)
+	}
+}
+
+func (h *Handler) assumeRoleWithWebIdentity(r *http.Request) (*assumeRoleWithWebIdentityResponse, *errorResponse) {
 	webIdentityToken := r.FormValue("WebIdentityToken")
 	if webIdentityToken == "" {
-		writeSTSError(w, http.StatusBadRequest, "MissingParameter", "WebIdentityToken is required")
-		return
+		return nil, &errorResponse{statusCode: http.StatusBadRequest, code: "MissingParameter", message: "missing web identity token"}
 	}
 
 	claims, err := h.jwtValidator.Validate(r.Context(), webIdentityToken)
 	if err != nil {
 		h.logger.Warn("sts: JWT validation failed", "error", err, "remote", r.RemoteAddr)
-		writeSTSError(w, http.StatusForbidden, "InvalidIdentityToken", "JWT validation failed: "+err.Error())
-		return
+		return nil, &errorResponse{statusCode: http.StatusForbidden, code: "InvalidIdentityToken", message: "invalid identity token"}
 	}
 
 	creds, err := IssueCredentials(h.secret, claims, h.ttl)
 	if err != nil {
 		h.logger.Error("sts: failed to issue credentials", "error", err)
-		writeSTSError(w, http.StatusInternalServerError, "ServiceUnavailable", "credential issuance failed")
-		return
+		return nil, &errorResponse{statusCode: http.StatusInternalServerError, code: "InvalidIdentityToken", message: "failed to issue credentials"}
 	}
 
 	h.logger.Info("sts: issued credentials",
@@ -105,15 +123,14 @@ func (h *Handler) assumeRoleWithWebIdentity(w http.ResponseWriter, r *http.Reque
 			RequestId: newRequestID(),
 		},
 	}
-
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, xml.Header)
-	if err := xml.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Error("sts: failed to encode response", "error", err)
-	}
+	return &resp, nil
 }
 
+type errorResponse struct {
+	statusCode int
+	code       string
+	message    string
+}
 type assumeRoleWithWebIdentityResponse struct {
 	XMLName          xml.Name            `xml:"AssumeRoleWithWebIdentityResponse"`
 	Xmlns            string              `xml:"xmlns,attr"`
@@ -146,7 +163,7 @@ type xmlResponseMetadata struct {
 func writeSTSError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "text/xml")
 	w.WriteHeader(status)
-	fmt.Fprintf(w,
+	_, _ = fmt.Fprintf(w,
 		`<?xml version="1.0" encoding="UTF-8"?>`+"\n"+
 			`<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">`+"\n"+
 			`  <Error><Type>Sender</Type><Code>%s</Code><Message>%s</Message></Error>`+"\n"+
@@ -158,7 +175,7 @@ func writeSTSError(w http.ResponseWriter, status int, code, message string) {
 
 func newRequestID() string {
 	b := make([]byte, 16)
-	rand.Read(b) //nolint:errcheck — rand.Read never errors on modern Go
+	rand.Read(b) //nolint:errcheck
 	return fmt.Sprintf("%s-%s-%s-%s-%s",
 		hex.EncodeToString(b[0:4]),
 		hex.EncodeToString(b[4:6]),

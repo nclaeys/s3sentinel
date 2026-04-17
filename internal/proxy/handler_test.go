@@ -2,10 +2,10 @@ package proxy
 
 import (
 	"bytes"
-	"crypto/rand"
-	"crypto/rsa"
-	"encoding/json"
-	"fmt"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,10 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lestrrat-go/jwx/v2/jwa"
-	"github.com/lestrrat-go/jwx/v2/jwk"
-	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/dataminded/s3sentinel/internal/auth"
 	"github.com/dataminded/s3sentinel/internal/observability"
@@ -25,511 +24,431 @@ import (
 	"github.com/dataminded/s3sentinel/internal/sts"
 )
 
-func newTestMetrics(t *testing.T) *observability.Metrics {
-	t.Helper()
+// ── OPA stub ──────────────────────────────────────────────────────────────────
+
+type stubOPA struct {
+	allow         bool
+	err           error
+	capturedInput opa.Input
+}
+
+func (s *stubOPA) Check(_ context.Context) error { return nil }
+
+func (s *stubOPA) Allow(_ context.Context, input opa.Input) (bool, error) {
+	s.capturedInput = input
+	return s.allow, s.err
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+var testStsSecret = []byte("test-sts-handler-secret")
+
+func newTestMetrics() *observability.Metrics {
 	return observability.NewMetrics(prometheus.NewRegistry())
 }
 
-func opaServer(t *testing.T, allow bool) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, `{"result":%v}`, allow)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func backendServer(t *testing.T) (*httptest.Server, *http.Request) {
-	t.Helper()
-	var last *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		last = r
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok")) //nolint:errcheck
-	}))
-	t.Cleanup(srv.Close)
-	return srv, last
-}
-
-func newHandler(t *testing.T, opaURL, backendURL string, stsSecret []byte, jwtValidator *auth.JWTValidator) *Handler {
-	t.Helper()
+func newTestHandler(opaClient opa.OPAClient, backendURL string) *Handler {
 	return NewHandler(Config{
 		BackendEndpoint: backendURL,
 		BackendRegion:   "us-east-1",
-		BackendKey:      "test-access-key",
-		BackendSecret:   "test-secret-key",
-		ProxyHost:       "",
-		JWTValidator:    jwtValidator,
-		OPAClient:       opa.NewClient(opaURL),
-		Metrics:         newTestMetrics(t),
-		Logger:          slog.Default(),
-		STSTokenSecret:  stsSecret,
+		BackendKey:      "AKIAIOSFODNN7EXAMPLE",
+		BackendSecret:   "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		STSTokenSecret:  testStsSecret,
+		OPAClient:       opaClient,
+		Metrics:         newTestMetrics(),
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 }
 
-func stsToken(t *testing.T, secret []byte, subject string, groups []string) string {
+func issueToken(t *testing.T, claims *auth.Claims) string {
 	t.Helper()
-	claims := &auth.Claims{Subject: subject, Email: subject + "@example.com", Groups: groups}
-	creds, err := sts.IssueCredentials(secret, claims, time.Hour)
-	if err != nil {
-		t.Fatalf("IssueCredentials: %v", err)
-	}
+	creds, err := sts.IssueCredentials(testStsSecret, claims, time.Hour)
+	require.NoError(t, err)
 	return creds.SessionToken
 }
 
-func stsRequest(t *testing.T, method, path, sessionToken string) *http.Request {
+// stsRequest builds a request authenticated via AWS4-HMAC-SHA256 + X-Amz-Security-Token,
+// which is the STS flow that bypasses the JWTValidator (a concrete struct, not an interface).
+func stsRequest(t *testing.T, method, rawURL, sessionToken string) *http.Request {
 	t.Helper()
-	req := httptest.NewRequest(method, path, nil)
-	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=ASIAFAKE/20240101/us-east-1/s3/aws4_request")
-	req.Header.Set("X-Amz-Security-Token", sessionToken)
-	return req
+	r := httptest.NewRequest(method, rawURL, nil)
+	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=SENTINEL12345678901234/20260417/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fakesig")
+	r.Header.Set("X-Amz-Security-Token", sessionToken)
+	return r
 }
 
-const testIssuer = "https://test.example.com"
-
-// jwksServer starts an httptest JWKS server backed by a fresh RSA key pair.
-func jwksServer(t *testing.T) (*rsa.PrivateKey, *httptest.Server) {
-	t.Helper()
-
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
+func testClaims() *auth.Claims {
+	return &auth.Claims{
+		Subject: "alice",
+		Email:   "alice@example.com",
+		Groups:  []string{"engineers"},
 	}
-
-	pubJWK, err := jwk.FromRaw(privKey.Public())
-	if err != nil {
-		t.Fatalf("JWK from public key: %v", err)
-	}
-	pubJWK.Set(jwk.KeyIDKey, "test-kid")    //nolint:errcheck
-	pubJWK.Set(jwk.AlgorithmKey, jwa.RS256) //nolint:errcheck
-
-	set := jwk.NewSet()
-	set.AddKey(pubJWK) //nolint:errcheck
-
-	keyBytes, err := json.Marshal(set)
-	if err != nil {
-		t.Fatalf("marshal JWKS: %v", err)
-	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(keyBytes) //nolint:errcheck
-	}))
-	t.Cleanup(srv.Close)
-	return privKey, srv
-}
-
-func signJWT(t *testing.T, privKey *rsa.PrivateKey, subject, email string, groups []string) string {
-	t.Helper()
-
-	tok, err := jwt.NewBuilder().
-		Issuer(testIssuer).
-		Subject(subject).
-		IssuedAt(time.Now()).
-		Expiration(time.Now().Add(time.Hour)).
-		Claim("email", email).
-		Claim("groups", groups).
-		Build()
-	if err != nil {
-		t.Fatalf("build JWT: %v", err)
-	}
-
-	privJWK, err := jwk.FromRaw(privKey)
-	if err != nil {
-		t.Fatalf("JWK from private key: %v", err)
-	}
-	privJWK.Set(jwk.KeyIDKey, "test-kid")    //nolint:errcheck
-	privJWK.Set(jwk.AlgorithmKey, jwa.RS256) //nolint:errcheck
-
-	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.RS256, privJWK))
-	if err != nil {
-		t.Fatalf("sign JWT: %v", err)
-	}
-	return string(signed)
-}
-
-func newJWTValidator(t *testing.T, jwksURL string) *auth.JWTValidator {
-	t.Helper()
-	v, err := auth.NewJWTValidator(jwksURL, testIssuer, nil)
-	if err != nil {
-		t.Fatalf("NewJWTValidator: %v", err)
-	}
-	return v
 }
 
 func TestExtractAuth(t *testing.T) {
-	cases := []struct {
-		name            string
-		headers         map[string]string
-		wantRaw         string
-		wantSession     string
-		wantErrContains string
+	tests := []struct {
+		name          string
+		authorization string
+		xAuthToken    string
+		xAmzSecurity  string
+		wantRaw       string
+		wantSession   string
+		errExpected   bool
 	}{
 		{
-			name:    "bearer token",
-			headers: map[string]string{"Authorization": "Bearer my-jwt-token"},
-			wantRaw: "my-jwt-token",
+			name:          "Bearer token",
+			authorization: "Bearer my.jwt.token",
+			wantRaw:       "my.jwt.token",
 		},
 		{
-			name:    "x-auth-token",
-			headers: map[string]string{"X-Auth-Token": "my-x-auth-token"},
-			wantRaw: "my-x-auth-token",
+			name:       "X-Auth-Token",
+			xAuthToken: "my.jwt.token",
+			wantRaw:    "my.jwt.token",
 		},
 		{
-			name: "aws4 with security token",
-			headers: map[string]string{
-				"Authorization":        "AWS4-HMAC-SHA256 Credential=test",
-				"X-Amz-Security-Token": "session-token-value",
-			},
-			wantSession: "session-token-value",
+			name:          "Bearer takes precedence over X-Auth-Token",
+			authorization: "Bearer bearer.token",
+			xAuthToken:    "xauth.token",
+			wantRaw:       "bearer.token",
 		},
 		{
-			name:            "aws4 without security token",
-			headers:         map[string]string{"Authorization": "AWS4-HMAC-SHA256 Credential=test"},
-			wantErrContains: "X-Amz-Security-Token",
+			name:          "AWS4 with X-Amz-Security-Token",
+			authorization: "AWS4-HMAC-SHA256 Credential=SENTINEL123",
+			xAmzSecurity:  "sts.session.token",
+			wantSession:   "sts.session.token",
 		},
 		{
-			name:            "no credentials",
-			headers:         map[string]string{},
-			wantErrContains: "no bearer token",
+			name:          "AWS4 without X-Amz-Security-Token returns error",
+			authorization: "AWS4-HMAC-SHA256 Credential=SENTINEL123",
+			errExpected:   true,
+		},
+		{
+			name:        "no credentials returns error",
+			errExpected: true,
+		},
+		{
+			name:          "unrecognised Authorization scheme returns error",
+			authorization: "Basic dXNlcjpwYXNz",
+			errExpected:   true,
 		},
 	}
 
-	for _, tc := range cases {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			for k, v := range tc.headers {
-				req.Header.Set(k, v)
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			if tc.authorization != "" {
+				r.Header.Set("Authorization", tc.authorization)
+			}
+			if tc.xAuthToken != "" {
+				r.Header.Set("X-Auth-Token", tc.xAuthToken)
+			}
+			if tc.xAmzSecurity != "" {
+				r.Header.Set("X-Amz-Security-Token", tc.xAmzSecurity)
 			}
 
-			raw, session, err := extractAuth(req)
-
-			if tc.wantErrContains != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantErrContains)
-				}
-				if !strings.Contains(err.Error(), tc.wantErrContains) {
-					t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrContains)
-				}
+			raw, session, err := extractAuth(r)
+			if tc.errExpected {
+				assert.Error(t, err)
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if raw != tc.wantRaw {
-				t.Errorf("rawToken: got %q, want %q", raw, tc.wantRaw)
-			}
-			if session != tc.wantSession {
-				t.Errorf("sessionToken: got %q, want %q", session, tc.wantSession)
-			}
-		})
-	}
-}
-
-func TestResolvePayloadHash(t *testing.T) {
-	bodyContent := []byte("hello world")
-
-	cases := []struct {
-		name           string
-		buildReq       func() *http.Request
-		wantHash       string
-		wantBodyNil    bool
-		wantContentLen int64
-	}{
-		{
-			name: "presigned url → UNSIGNED-PAYLOAD",
-			buildReq: func() *http.Request {
-				req := httptest.NewRequest(http.MethodGet, "/?X-Amz-Signature=abc", nil)
-				req.Body = io.NopCloser(bytes.NewReader(bodyContent))
-				req.ContentLength = int64(len(bodyContent))
-				return req
-			},
-			wantHash:       "UNSIGNED-PAYLOAD",
-			wantContentLen: int64(len(bodyContent)),
-		},
-		{
-			name: "streaming payload header → UNSIGNED-PAYLOAD",
-			buildReq: func() *http.Request {
-				req := httptest.NewRequest(http.MethodPut, "/bucket/key", io.NopCloser(bytes.NewReader(bodyContent)))
-				req.Header.Set("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
-				req.ContentLength = int64(len(bodyContent))
-				return req
-			},
-			wantHash:       "UNSIGNED-PAYLOAD",
-			wantContentLen: int64(len(bodyContent)),
-		},
-		{
-			name: "explicitly unsigned → UNSIGNED-PAYLOAD",
-			buildReq: func() *http.Request {
-				req := httptest.NewRequest(http.MethodPut, "/bucket/key", io.NopCloser(bytes.NewReader(bodyContent)))
-				req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
-				req.ContentLength = int64(len(bodyContent))
-				return req
-			},
-			wantHash:       "UNSIGNED-PAYLOAD",
-			wantContentLen: int64(len(bodyContent)),
-		},
-		{
-			name: "no body → empty body hash",
-			buildReq: func() *http.Request {
-				return httptest.NewRequest(http.MethodGet, "/bucket/key", nil)
-			},
-			wantHash:    emptyBodyHash,
-			wantBodyNil: true,
-		},
-		{
-			name: "regular body → real sha256",
-			buildReq: func() *http.Request {
-				req := httptest.NewRequest(http.MethodPut, "/bucket/key", bytes.NewReader(bodyContent))
-				req.ContentLength = int64(len(bodyContent))
-				return req
-			},
-			// SHA-256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576fea1e3a2
-			// Let the test just verify it's a 64-char hex string (not UNSIGNED-PAYLOAD).
-			wantHash:       "",
-			wantContentLen: int64(len(bodyContent)),
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := tc.buildReq()
-			hash, body, contentLength, err := resolvePayloadHash(req)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if tc.wantHash != "" && hash != tc.wantHash {
-				t.Errorf("hash: got %q, want %q", hash, tc.wantHash)
-			}
-			// For the "regular body" case verify it looks like a real hex sha256.
-			if tc.name == "regular body → real sha256" {
-				if len(hash) != 64 {
-					t.Errorf("expected 64-char hex hash, got %q (len=%d)", hash, len(hash))
-				}
-				if hash == emptyBodyHash || hash == "UNSIGNED-PAYLOAD" {
-					t.Errorf("expected real body hash, got %q", hash)
-				}
-			}
-
-			if tc.wantBodyNil && body != nil {
-				t.Error("expected nil body, got non-nil")
-			}
-			if tc.wantContentLen != 0 && contentLength != tc.wantContentLen {
-				t.Errorf("contentLength: got %d, want %d", contentLength, tc.wantContentLen)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantRaw, raw)
+			assert.Equal(t, tc.wantSession, session)
 		})
 	}
 }
 
 func TestIsDroppedHeader(t *testing.T) {
-	dropped := []string{
-		"Authorization", "authorization",
-		"X-Amz-Security-Token", "x-amz-security-token",
+	alwaysDropped := []string{
+		"Authorization",
+		"X-Amz-Security-Token",
 		"X-Auth-Token",
 		"X-Amz-Date",
 		"X-Amz-Content-Sha256",
 		"Host",
 		"Content-Length",
 	}
-	for _, h := range dropped {
-		if !isDroppedHeader(h) {
-			t.Errorf("isDroppedHeader(%q) = false, want true", h)
-		}
+	for _, h := range alwaysDropped {
+		t.Run("drop/"+h, func(t *testing.T) {
+			assert.True(t, isDroppedHeader(h))
+		})
+		// Lowercase variants must also be dropped (canonical form matching).
+		t.Run("drop/lowercase/"+h, func(t *testing.T) {
+			assert.True(t, isDroppedHeader(strings.ToLower(h)))
+		})
 	}
 
-	kept := []string{"Content-Type", "X-Amz-Copy-Source", "Accept", "User-Agent"}
-	for _, h := range kept {
-		if isDroppedHeader(h) {
-			t.Errorf("isDroppedHeader(%q) = true, want false", h)
-		}
+	alwaysKept := []string{
+		"Content-Type",
+		"Accept",
+		"X-Amz-Copy-Source",
+		"X-Custom-Header",
 	}
-}
-
-func TestServeHTTP_NoAuth(t *testing.T) {
-	opa := opaServer(t, true)
-	backend, _ := backendServer(t)
-	stsSecret := []byte("test-sts-secret")
-
-	h := newHandler(t, opa.URL, backend.URL, stsSecret, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/my-bucket/my-key", nil)
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusUnauthorized {
-		t.Errorf("got %d, want 401", rw.Code)
+	for _, h := range alwaysKept {
+		t.Run("keep/"+h, func(t *testing.T) {
+			assert.False(t, isDroppedHeader(h))
+		})
 	}
 }
 
-func TestServeHTTP_STS_Allowed(t *testing.T) {
-	opaSrv := opaServer(t, true)
-	backend, _ := backendServer(t)
-	stsSecret := []byte("test-sts-secret")
-
-	h := newHandler(t, opaSrv.URL, backend.URL, stsSecret, nil)
-
-	token := stsToken(t, stsSecret, "alice", []string{"admin"})
-	req := stsRequest(t, http.MethodGet, "/my-bucket/my-key", token)
-
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusOK {
-		t.Errorf("got %d, want 200; body: %s", rw.Code, rw.Body.String())
+func TestResolvePayloadHash(t *testing.T) {
+	hashOf := func(data []byte) string {
+		sum := sha256.Sum256(data)
+		return hex.EncodeToString(sum[:])
 	}
+
+	t.Run("presigned URL returns UNSIGNED-PAYLOAD", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/bucket/key?X-Amz-Signature=abc", nil)
+		hash, _, _, err := resolvePayloadHash(r)
+		require.NoError(t, err)
+		assert.Equal(t, "UNSIGNED-PAYLOAD", hash)
+	})
+
+	t.Run("UNSIGNED-PAYLOAD header returns UNSIGNED-PAYLOAD", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader("data"))
+		r.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+		hash, _, _, err := resolvePayloadHash(r)
+		require.NoError(t, err)
+		assert.Equal(t, "UNSIGNED-PAYLOAD", hash)
+	})
+
+	t.Run("STREAMING-AWS4-HMAC-SHA256-PAYLOAD returns UNSIGNED-PAYLOAD", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader("data"))
+		r.Header.Set("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+		hash, _, _, err := resolvePayloadHash(r)
+		require.NoError(t, err)
+		assert.Equal(t, "UNSIGNED-PAYLOAD", hash)
+	})
+
+	t.Run("STREAMING-UNSIGNED-PAYLOAD-TRAILER returns UNSIGNED-PAYLOAD", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader("data"))
+		r.Header.Set("X-Amz-Content-Sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+		hash, _, _, err := resolvePayloadHash(r)
+		require.NoError(t, err)
+		assert.Equal(t, "UNSIGNED-PAYLOAD", hash)
+	})
+
+	t.Run("nil body returns empty-body hash", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/bucket/key", nil)
+		hash, body, contentLength, err := resolvePayloadHash(r)
+		require.NoError(t, err)
+		assert.Equal(t, emptyBodyHash, hash)
+		assert.Nil(t, body)
+		assert.Equal(t, int64(0), contentLength)
+	})
+
+	t.Run("body is hashed and buffered", func(t *testing.T) {
+		data := []byte("hello world")
+		r := httptest.NewRequest(http.MethodPut, "/bucket/key", bytes.NewReader(data))
+		r.ContentLength = int64(len(data))
+
+		hash, body, contentLength, err := resolvePayloadHash(r)
+		require.NoError(t, err)
+		assert.Equal(t, hashOf(data), hash)
+		assert.Equal(t, int64(len(data)), contentLength)
+
+		got, err := io.ReadAll(body)
+		require.NoError(t, err)
+		assert.Equal(t, data, got)
+	})
 }
 
-func TestServeHTTP_STS_Denied(t *testing.T) {
-	opaSrv := opaServer(t, false)
-	backend, _ := backendServer(t)
-	stsSecret := []byte("test-sts-secret")
-
-	h := newHandler(t, opaSrv.URL, backend.URL, stsSecret, nil)
-
-	token := stsToken(t, stsSecret, "bob", []string{"reader"})
-	req := stsRequest(t, http.MethodPut, "/my-bucket/my-key", token)
-
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusForbidden {
-		t.Errorf("got %d, want 403; body: %s", rw.Code, rw.Body.String())
-	}
-	if !strings.Contains(rw.Body.String(), "AccessDenied") {
-		t.Errorf("response does not contain AccessDenied: %s", rw.Body.String())
-	}
+func S3BackendReturningError(t *testing.T, errorMsg string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error(errorMsg)
+	}))
 }
 
-func TestServeHTTP_STS_Disabled(t *testing.T) {
-	opaSrv := opaServer(t, true)
-	backend, _ := backendServer(t)
-	stsSecret := []byte("test-sts-secret")
+func TestServeHTTP_MissingCredentials(t *testing.T) {
+	backend := S3BackendReturningError(t, "backend must not be reached when auth is missing")
+	defer backend.Close()
 
-	// Handler with no STS secret configured.
-	h := newHandler(t, opaSrv.URL, backend.URL, nil, nil)
+	h := newTestHandler(&stubOPA{allow: true}, backend.URL)
+	r := httptest.NewRequest(http.MethodGet, "/mybucket/mykey", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
 
-	token := stsToken(t, stsSecret, "alice", []string{"admin"})
-	req := stsRequest(t, http.MethodGet, "/my-bucket/my-key", token)
-
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusUnauthorized {
-		t.Errorf("got %d, want 401; body: %s", rw.Code, rw.Body.String())
-	}
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "InvalidToken")
 }
 
-func TestServeHTTP_STS_InvalidToken(t *testing.T) {
-	opaSrv := opaServer(t, true)
-	backend, _ := backendServer(t)
-	stsSecret := []byte("test-sts-secret")
+func TestServeHTTP_STS_NotConfigured(t *testing.T) {
+	backend := S3BackendReturningError(t, "backend must not be reached when STS is not configured")
+	defer backend.Close()
 
-	h := newHandler(t, opaSrv.URL, backend.URL, stsSecret, nil)
+	h := NewHandler(Config{
+		STSTokenSecret:  nil, //STS not configured
+		BackendEndpoint: backend.URL,
+		BackendRegion:   "us-east-1",
+		BackendKey:      "key",
+		BackendSecret:   "secret",
+		OPAClient:       &stubOPA{allow: true},
+		Metrics:         newTestMetrics(),
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
 
-	req := stsRequest(t, http.MethodGet, "/my-bucket/my-key", "not-a-valid-jwt")
+	r := httptest.NewRequest(http.MethodGet, "/mybucket/mykey", nil)
+	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=SENTINEL123")
+	r.Header.Set("X-Amz-Security-Token", "some.sts.token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
 
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusUnauthorized {
-		t.Errorf("got %d, want 401; body: %s", rw.Code, rw.Body.String())
-	}
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestServeHTTP_JWT_Allowed(t *testing.T) {
-	privKey, jwks := jwksServer(t)
-	opaSrv := opaServer(t, true)
-	backend, _ := backendServer(t)
-	stsSecret := []byte("test-sts-secret")
+func TestServeHTTP_InvalidSTSToken(t *testing.T) {
+	backend := S3BackendReturningError(t, "backend must not be reached when STS token is invalid")
+	defer backend.Close()
 
-	validator := newJWTValidator(t, jwks.URL)
-	h := newHandler(t, opaSrv.URL, backend.URL, stsSecret, validator)
+	h := newTestHandler(&stubOPA{allow: true}, backend.URL)
 
-	rawJWT := signJWT(t, privKey, "alice", "alice@example.com", []string{"admin"})
+	r := httptest.NewRequest(http.MethodGet, "/mybucket/mykey", nil)
+	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=SENTINEL123")
+	r.Header.Set("X-Amz-Security-Token", "not.a.valid.jwt")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
 
-	req := httptest.NewRequest(http.MethodGet, "/my-bucket/my-key", nil)
-	req.Header.Set("Authorization", "Bearer "+rawJWT)
-
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusOK {
-		t.Errorf("got %d, want 200; body: %s", rw.Code, rw.Body.String())
-	}
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestServeHTTP_JWT_InvalidToken(t *testing.T) {
-	_, jwks := jwksServer(t)
-	opaSrv := opaServer(t, true)
-	backend, _ := backendServer(t)
+func TestServeHTTP_OPADeny(t *testing.T) {
+	backend := S3BackendReturningError(t, "backend must not be reached when OPA denies")
+	defer backend.Close()
 
-	validator := newJWTValidator(t, jwks.URL)
-	h := newHandler(t, opaSrv.URL, backend.URL, nil, validator)
+	h := newTestHandler(&stubOPA{allow: false}, backend.URL)
+	token := issueToken(t, testClaims())
 
-	req := httptest.NewRequest(http.MethodGet, "/my-bucket/my-key", nil)
-	req.Header.Set("Authorization", "Bearer not.a.real.jwt")
+	r := stsRequest(t, http.MethodGet, "/mybucket/mykey", token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
 
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusUnauthorized {
-		t.Errorf("got %d, want 401; body: %s", rw.Code, rw.Body.String())
-	}
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "AccessDenied")
 }
 
 func TestServeHTTP_OPAError(t *testing.T) {
-	// OPA server returns a non-200 to simulate an error.
-	opaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(opaSrv.Close)
+	backend := S3BackendReturningError(t, "backend must not be reached when OPA is unavailable")
+	defer backend.Close()
 
-	backend, _ := backendServer(t)
-	stsSecret := []byte("test-sts-secret")
+	h := newTestHandler(&stubOPA{err: errors.New("opa unavailable")}, backend.URL)
+	token := issueToken(t, testClaims())
 
-	h := newHandler(t, opaSrv.URL, backend.URL, stsSecret, nil)
+	r := stsRequest(t, http.MethodGet, "/mybucket/mykey", token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
 
-	token := stsToken(t, stsSecret, "alice", []string{"admin"})
-	req := stsRequest(t, http.MethodGet, "/my-bucket/my-key", token)
-
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusInternalServerError {
-		t.Errorf("got %d, want 500; body: %s", rw.Code, rw.Body.String())
-	}
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "InternalError")
 }
 
-func TestServeHTTP_PUT_ForwardsBody(t *testing.T) {
-	opaSrv := opaServer(t, true)
-	stsSecret := []byte("test-sts-secret")
+func TestServeHTTP_OPAReceivesCorrectInput(t *testing.T) {
+	backend := S3BackendSuccessWithBody(t, "", "")
+	defer backend.Close()
 
-	// Capture the body that reaches the backend.
-	var receivedBody []byte
+	stub := &stubOPA{allow: true}
+	h := newTestHandler(stub, backend.URL)
+	claims := testClaims()
+	token := issueToken(t, claims)
+
+	r := stsRequest(t, http.MethodGet, "http://proxy.example.com/mybucket/mykey", token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	assert.Equal(t, claims.Subject, stub.capturedInput.Principal)
+	assert.Equal(t, claims.Email, stub.capturedInput.Email)
+	assert.Equal(t, claims.Groups, stub.capturedInput.Groups)
+	assert.Equal(t, "GetObject", stub.capturedInput.Action)
+	assert.Equal(t, "mybucket", stub.capturedInput.Bucket)
+	assert.Equal(t, "mykey", stub.capturedInput.Key)
+}
+
+func S3BackendSuccessWithBody(t *testing.T, body string, backendHeaderKey string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if backendHeaderKey != "" {
+			w.Header().Set(backendHeaderKey, backendHeaderKey)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, err := w.Write([]byte(body))
+		assert.NoError(t, err)
+	}))
+}
+
+func TestServeHTTP_ForwardResponseToClient(t *testing.T) {
+	backendHeader := "X-Backend-Header"
+	backendBody := "object body"
+	backend := S3BackendSuccessWithBody(t, backendBody, backendHeader)
+	defer backend.Close()
+
+	h := newTestHandler(&stubOPA{allow: true}, backend.URL)
+	token := issueToken(t, testClaims())
+
+	r := stsRequest(t, http.MethodGet, "http://proxy.example.com/mybucket/mykey", token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, backendBody, w.Body.String())
+	assert.Equal(t, backendHeader, w.Header().Get(backendHeader))
+}
+
+func TestServeHTTP_ForwardStripsAuthHeaders(t *testing.T) {
+	var captured *http.Request
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedBody, _ = io.ReadAll(r.Body)
+		captured = r
 		w.WriteHeader(http.StatusOK)
 	}))
-	t.Cleanup(backend.Close)
+	defer backend.Close()
 
-	h := newHandler(t, opaSrv.URL, backend.URL, stsSecret, nil)
+	h := newTestHandler(&stubOPA{allow: true}, backend.URL)
+	token := issueToken(t, testClaims())
 
-	payload := []byte("the object content")
-	token := stsToken(t, stsSecret, "alice", []string{"admin"})
+	r := stsRequest(t, http.MethodGet, "http://proxy.example.com/mybucket/mykey", token)
+	r.Header.Set("X-Custom-Passthrough", "keep-me")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
 
-	req := httptest.NewRequest(http.MethodPut, "/my-bucket/my-key", bytes.NewReader(payload))
-	req.ContentLength = int64(len(payload))
-	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=ASIAFAKE/20240101/us-east-1/s3/aws4_request")
-	req.Header.Set("X-Amz-Security-Token", token)
+	require.NotNil(t, captured)
+	assert.Contains(t, captured.Header.Get("Authorization"), "AKIAIOSFODNN7EXAMPLE", "re-signed with backend key")
+	assert.NotContains(t, captured.Header.Get("Authorization"), "fakesig", "client signature must not reach backend")
+	assert.Empty(t, captured.Header.Get("X-Amz-Security-Token"), "client session token should be stripped")
+	assert.Empty(t, captured.Header.Get("X-Auth-Token"), "X-Auth-Token should be stripped")
+	assert.Equal(t, "keep-me", captured.Header.Get("X-Custom-Passthrough"))
+}
 
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
+func TestServeHTTP_ForwardQueryString(t *testing.T) {
+	var captured *http.Request
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
 
-	if rw.Code != http.StatusOK {
-		t.Fatalf("got %d, want 200; body: %s", rw.Code, rw.Body.String())
-	}
-	if !bytes.Equal(receivedBody, payload) {
-		t.Errorf("backend received body %q, want %q", receivedBody, payload)
-	}
+	h := newTestHandler(&stubOPA{allow: true}, backend.URL)
+	token := issueToken(t, testClaims())
+
+	r := stsRequest(t, http.MethodGet, "http://proxy.example.com/mybucket?list-type=2&prefix=data/", token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	require.NotNil(t, captured)
+	assert.Equal(t, "2", captured.URL.Query().Get("list-type"))
+	assert.Equal(t, "data/", captured.URL.Query().Get("prefix"))
+}
+
+func TestServeHTTP_BackendNon200ProxiedToClient(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("<Error><Code>NoSuchKey</Code></Error>"))
+	}))
+	defer backend.Close()
+
+	h := newTestHandler(&stubOPA{allow: true}, backend.URL)
+	token := issueToken(t, testClaims())
+
+	r := stsRequest(t, http.MethodGet, "http://proxy.example.com/mybucket/missing-key", token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "NoSuchKey")
 }

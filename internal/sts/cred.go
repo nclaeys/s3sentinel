@@ -89,7 +89,7 @@ func randomAccessKeyID() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return "ASIA" + strings.ToUpper(hex.EncodeToString(b)), nil
+	return "SENTINEL" + strings.ToUpper(hex.EncodeToString(b)), nil
 }
 
 func randomSecretKey() (string, error) {
