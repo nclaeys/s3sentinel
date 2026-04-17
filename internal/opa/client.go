@@ -73,7 +73,7 @@ func (c *Client) Check(ctx context.Context) error {
 	if c.healthURL == "" {
 		return fmt.Errorf("could not derive OPA health URL from endpoint %q", c.endpoint)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.healthURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.healthURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("build OPA health request: %w", err)
 	}
@@ -81,7 +81,7 @@ func (c *Client) Check(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("OPA health check: %w", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("OPA health returned HTTP %d", resp.StatusCode)
 	}
@@ -107,7 +107,7 @@ func (c *Client) Allow(ctx context.Context, input Input) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("call OPA: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("OPA returned HTTP %d", resp.StatusCode)

@@ -18,8 +18,8 @@ const (
 	ActionDeleteBucket         Action = "DeleteBucket"
 	ActionListObjects          Action = "ListObjects"
 	ActionListObjectsV2        Action = "ListObjectsV2"
-	ActionGetBucketAcl         Action = "GetBucketAcl"
-	ActionPutBucketAcl         Action = "PutBucketAcl"
+	ActionGetBucketACL         Action = "GetBucketAcl"
+	ActionPutBucketACL         Action = "PutBucketAcl"
 	ActionGetBucketLocation    Action = "GetBucketLocation"
 	ActionGetBucketVersioning  Action = "GetBucketVersioning"
 	ActionPutBucketVersioning  Action = "PutBucketVersioning"
@@ -36,8 +36,8 @@ const (
 	ActionPutObject               Action = "PutObject"
 	ActionDeleteObject            Action = "DeleteObject"
 	ActionCopyObject              Action = "CopyObject"
-	ActionGetObjectAcl            Action = "GetObjectAcl"
-	ActionPutObjectAcl            Action = "PutObjectAcl"
+	ActionGetObjectACL            Action = "GetObjectAcl"
+	ActionPutObjectACL            Action = "PutObjectAcl"
 	ActionGetObjectTagging        Action = "GetObjectTagging"
 	ActionPutObjectTagging        Action = "PutObjectTagging"
 	ActionDeleteObjectTagging     Action = "DeleteObjectTagging"
@@ -86,7 +86,7 @@ func parseBucketAction(method string, q url.Values, bucket string) S3RequestCont
 	case http.MethodPut:
 		switch {
 		case q.Has("acl"):
-			pr.Action = ActionPutBucketAcl
+			pr.Action = ActionPutBucketACL
 		case q.Has("versioning"):
 			pr.Action = ActionPutBucketVersioning
 		case q.Has("cors"):
@@ -113,7 +113,7 @@ func parseBucketAction(method string, q url.Values, bucket string) S3RequestCont
 	case http.MethodGet:
 		switch {
 		case q.Has("acl"):
-			pr.Action = ActionGetBucketAcl
+			pr.Action = ActionGetBucketACL
 		case q.Has("location"):
 			pr.Action = ActionGetBucketLocation
 		case q.Has("versioning"):
@@ -142,7 +142,7 @@ func parseObjectAction(r *http.Request, method string, q url.Values, bucket, key
 	case http.MethodGet:
 		switch {
 		case q.Has("acl"):
-			pr.Action = ActionGetObjectAcl
+			pr.Action = ActionGetObjectACL
 		case q.Has("tagging"):
 			pr.Action = ActionGetObjectTagging
 		case q.Has("uploadId") && !q.Has("partNumber"):
@@ -157,7 +157,7 @@ func parseObjectAction(r *http.Request, method string, q url.Values, bucket, key
 	case http.MethodPut:
 		switch {
 		case q.Has("acl"):
-			pr.Action = ActionPutObjectAcl
+			pr.Action = ActionPutObjectACL
 		case q.Has("tagging"):
 			pr.Action = ActionPutObjectTagging
 		case q.Has("partNumber"):

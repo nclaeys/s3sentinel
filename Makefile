@@ -12,15 +12,11 @@ IMAGE_TAG  ?= dev
 
 .DEFAULT_GOAL := help
 
-# ── Help ───────────────────────────────────────────────────────────────────────
-
 .PHONY: help
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' \
 		| sort
-
-# ── Build ──────────────────────────────────────────────────────────────────────
 
 .PHONY: build
 build: ## Build the binary
@@ -35,8 +31,6 @@ build-linux: ## Cross-compile a static Linux binary (for Docker)
 clean: ## Remove build artefacts
 	rm -f $(BUILD_DIR)/$(BINARY)
 
-# ── Run ────────────────────────────────────────────────────────────────────────
-
 .PHONY: run
 run: ## Run the proxy (reads .env if present)
 	@if [ -f .env ]; then \
@@ -44,8 +38,6 @@ run: ## Run the proxy (reads .env if present)
 	else \
 		$(GO) run $(CMD); \
 	fi
-
-# ── Test ───────────────────────────────────────────────────────────────────────
 
 .PHONY: test
 test: ## Run all tests
@@ -64,8 +56,6 @@ cover: ## Generate and display a coverage report
 	$(GO) test -coverprofile=coverage.out ./...
 	$(GO) tool cover -html=coverage.out
 
-# ── Code quality ───────────────────────────────────────────────────────────────
-
 .PHONY: vet
 vet: ## Run go vet
 	$(GO) vet ./...
@@ -78,10 +68,12 @@ fmt: ## Format all Go source files
 lint: ## Run golangci-lint (install: https://golangci-lint.run/usage/install/)
 	golangci-lint run ./...
 
-.PHONY: check
-check: vet test ## Run vet + tests (fast CI gate)
+.PHONY: lint-fix
+lint-fix: ## Run golangci-lint and apply auto-fixes
+	golangci-lint run --fix ./...
 
-# ── Dependencies ───────────────────────────────────────────────────────────────
+.PHONY: check
+check: vet test lint ## Run vet + tests + lint (CI gate)
 
 .PHONY: tidy
 tidy: ## Tidy and verify go.mod / go.sum
@@ -92,8 +84,6 @@ tidy: ## Tidy and verify go.mod / go.sum
 download: ## Download all module dependencies
 	$(GO) mod download
 
-# ── Docker ─────────────────────────────────────────────────────────────────────
-
 .PHONY: docker-build
 docker-build: ## Build the Docker image
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
@@ -103,8 +93,6 @@ docker-run: ## Run the Docker image (reads .env if present)
 	docker run --rm --env-file .env \
 		-p 8080:8080 -p 8090:8090 -p 9090:9090 \
 		$(IMAGE_NAME):$(IMAGE_TAG)
-
-# ── Local dev stack (examples/basic) ──────────────────────────────────────────
 
 .PHONY: up
 up: ## Start the local dev stack (OPA + Zitadel) via docker-compose
@@ -118,8 +106,6 @@ down: ## Stop the local dev stack
 logs: ## Tail logs from the local dev stack
 	docker compose -f examples/basic/docker-compose.yml logs -f
 
-# ── OPA ────────────────────────────────────────────────────────────────────────
-
 .PHONY: opa-run
 opa-run: ## Start OPA locally, serving the policy/ directory
 	opa run --server --addr :8181 policy/
@@ -127,8 +113,6 @@ opa-run: ## Start OPA locally, serving the policy/ directory
 .PHONY: opa-check
 opa-check: ## Validate and type-check all .rego files
 	opa check policy/
-
-# ── STS key generation ─────────────────────────────────────────────────────────
 
 .PHONY: gen-sts-secret
 gen-sts-secret: ## Generate a random 32-byte HMAC key for STS_TOKEN_SECRET
