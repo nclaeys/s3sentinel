@@ -5,40 +5,19 @@ EU cloud providers issue bucket-level service-account credentials mainly and hav
 This proxy sits in front of your bucket, owns the service-account key, and authorizes every S3 operation with [OPA](https://www.openpolicyagent.org/) based on the caller's OIDC identity.
 
 Two authentication flows are supported:
+- Direct JWT (clients present an OIDC token on every request, the proxy validates it and extracts identity claims)
+- STS credential vending (clients exchange an OIDC token for short-lived AWS credentials, then use those credentials in subsequent requests)
 
-**Flow A — Direct JWT** (simple setup, custom SDK integration required)
-```
-Client ──[Authorization: Bearer <OIDC JWT>]──► Proxy :8080
-                                                 ├─ Validate JWT (JWKS)
-                                                 ├─ Check OPA
-                                                 ├─ Re-sign → OVH S3
-                                                 └─ Stream response back
-```
-
-**Flow B — STS credential vending** (standard AWS SDK integration, no custom headers)
-```
-Client ──[WebIdentityToken=<OIDC JWT>]──► STS :8090
-                                            └─ Validate JWT → issue temp credentials
-                                               (AccessKeyID + SecretKey + SessionToken)
-
-Client ──[AWS SigV4 + X-Amz-Security-Token]──► Proxy :8080
-                                                  ├─ Validate SessionToken (HMAC JWT)
-                                                  ├─ Check OPA
-                                                  ├─ Re-sign → OVH S3
-                                                  └─ Stream response back
-```
-
-Flow B is compatible with every AWS SDK like: boto3, AWS CLI, Spark, DuckDB,...
-All of them support `AssumeRoleWithWebIdentity` natively.
+Flow B is compatible with boto3, AWS CLI, Spark, DuckDB,... since all of them support `AssumeRoleWithWebIdentity` natively.
 
 ## Prerequisites
 
 | Tool                    | Minimum version | Install                                                                             |
 |-------------------------|-----------------|-------------------------------------------------------------------------------------|
-| Go                      | 1.22            | <https://go.dev/dl/>                                                                |
-| OPA                     | 0.65            | `brew install opa` or [download](https://github.com/open-policy-agent/opa/releases) |
+| Go                      | 1.25            | <https://go.dev/dl/>                                                                |
+| OPA                     | 1.10            | `brew install opa` or [download](https://github.com/open-policy-agent/opa/releases) |
 | An S3 compatible bucket | —               | OVH Control Panel                                                                   |
-| An OIDC-capable IdP     | —               | Keycloak, Dex, Auth0, Google, …                                                     |
+| An OIDC-capable IdP     | —               | Keycloak, Zitadel, Auth0, Google                                                    |
 
 ## Getting started
 
@@ -153,138 +132,10 @@ A single proxy instance routes all requests to one backend endpoint. There is no
 
 TLS is configured via static certificate files. There is no built-in Let's Encrypt / ACME support. Use an external tool (Certbot, cert-manager) to obtain and renew certificates, and point `TLS_CERT_FILE` / `TLS_KEY_FILE` at the result.
 
-## Configuring s3 sentinel to fit your needs
+## Configuring s3 sentinel in your environment
 
-### Create your object Storage credentials
-
-#### Find your endpoint and region
-
-In the OVH Control Panel, go to **Public Cloud → Object Storage → your container** and note:
-
-- **Region** — shown in the container list (e.g. `GRA`, `SBG`, `WAW`). The proxy uses the lowercase form: `gra`, `sbg`, `waw`.
-- **Endpoint** — the S3-compatible URL for that region:
-
-#### Create S3 credentials
-
-The proxy uses a single service-account key pair with full bucket access. Clients never see it.
-When using OVH, you can get the credentials as follows:
-
-1. In the OVH Control Panel open **Public Cloud → Users & Roles → Users**.
-2. Create a user (or use an existing one) with the **ObjectStore operator** role.
-3. Click the user → **S3 credentials** tab → **Generate credentials**.
-4. Save the **Access key** and **Secret key** — they are shown only once.
-
-
-### Create your OPA policies
-
-OPA runs as a separate component and contains the policies for deciding whether a request is allowed or not. 
-S3sentinel calls OPA for every request before forwarding the request to the S3 compatible backend.
-
-#### Policy input format
-
-The proxy provides the following context to OPA:
-```json
-{
-  "input": {
-    "principal": "alice@example.com",
-    "email":     "alice@example.com",
-    "groups":    ["data-engineers", "eu-west"],
-    "action":    "GetObject",
-    "bucket":    "my-bucket",
-    "key":       "datasets/sales/2024.parquet"
-  }
-}
-```
-
-`action` is one of the S3 API operation names: `GetObject`, `PutObject`, `DeleteObject`, `ListObjects`, `ListObjectsV2`, `HeadObject`, `CopyObject`, `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload`, `GetBucketAcl`, `DeleteObjects`, and so on.
-
-#### Create a policy
-
-S3sentinel does not include any built-in policies so you must write your own to get started.
-Take a look at the [OPA documentation](https://www.openpolicyagent.org/docs/latest/policy-language/) and the example policy in `examples/basic/policy/reader-admin-policy.rego.
-
-#### Test your policy
-
-Add your policies in `examples/basic/policy/` directory and run `docker-compose up -d` from the `examples/basic` directory.
-OPA is now listening on `http://localhost:8181`.
-
-Verify your policy works before starting the proxy:
-
-```bash
-curl -s -X POST http://localhost:8181/v1/data/s3/allow \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "input": {
-      "principal": "alice",
-      "groups": ["data-engineers"],
-      "action": "GetObject",
-      "bucket": "my-bucket",
-      "key": "datasets/report.csv"
-    }
-  }' | jq .
-# → {"result":true}
-```
-
+Read the step-by-step guide in [docs/use-it-your-setup.md](docs/use-it-your-setup.md) to configure s3 sentinel with your OIDC provider, OPA policies, and an S3 compatible Object Storage bucket.
 
 ## How it works
 
-### Request flow
-
-**Flow A — Direct JWT**
-
-```
-1. Client sends an S3-shaped HTTP request with an OIDC JWT in
-   Authorization: Bearer <token>   or   X-Auth-Token: <token>
-
-2. Proxy validates the JWT signature and claims against the IdP's JWKS.
-   Expired / invalid tokens → 401.
-
-3. Proxy parses the HTTP method + path + query to determine the S3 action
-   (e.g. PUT /bucket/key → PutObject).
-
-4. Proxy POSTs to OPA:
-   { "input": { "principal", "email", "groups", "action", "bucket", "key" } }
-   OPA returns { "result": true|false }.
-   OPA deny → 403.  OPA error → 500 (fail-closed).
-
-5. Proxy strips the client's auth headers and re-signs the request with the
-   OVH service-account credentials using SigV4. The body hash is set to
-   "UNSIGNED-PAYLOAD" — a standard SigV4 option that avoids buffering the
-   entire request body for SHA-256 hashing, which matters for large uploads.
-
-6. Proxy forwards to OVH Object Storage and streams the response back.
-```
-
-**Flow B — STS credential vending**
-
-```
-[Credential exchange — happens once per TTL]
-
-1. Client POSTs to the STS server (:8090):
-   Action=AssumeRoleWithWebIdentity
-   WebIdentityToken=<OIDC JWT>
-
-2. STS validates the JWT against the IdP's JWKS (same validator as the proxy).
-
-3. STS issues three values:
-   - AccessKeyID:     random, AWS-style identifier (ASIA...)
-   - SecretAccessKey: random, used by the SDK for SigV4 signing
-   - SessionToken:    HMAC-signed JWT containing { sub, email, groups, exp }
-                      — stateless; no database or shared state required
-
-[Every subsequent S3 request]
-
-4. Client signs the request with AccessKeyID + SecretAccessKey (standard SigV4)
-   and attaches the SessionToken in the X-Amz-Security-Token header.
-
-5. Proxy detects the AWS4-HMAC-SHA256 Authorization header and reads the
-   SessionToken from X-Amz-Security-Token.
-
-6. Proxy validates the SessionToken's HMAC signature and expiry.
-   The principal, email, and groups are extracted directly from the token.
-   No JWKS lookup or IdP call is needed per-request.
-
-7. Steps 3–6 of Flow A apply (OPA check → re-sign → forward).
-```
-
-The SessionToken is a signed JWT, not an opaque token — the proxy verifies it locally using the shared `STS_TOKEN_SECRET`. There is no token store, no revocation list, and no database. Access is revoked when the token expires (configurable via `STS_TOKEN_TTL`).
+Read the detailed request flow in [docs/how-it-works.md](docs/how-it-works.md).
