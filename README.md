@@ -111,16 +111,16 @@ The proxy does not verify the AWS SigV4 signature that S3 SDKs attach to request
 
 The following S3 API families are not in the action map. Requests that match them are classified as `Unknown` and forwarded to the backend without a named action — your OPA policy must handle `Unknown` explicitly if you want to block them.
 
-| Family | Example operations |
-|---|---|
-| Object Lock / WORM | `GetObjectLegalHold`, `PutObjectLegalHold`, `GetObjectRetention`, `PutObjectRetention` |
-| Bucket lifecycle | `GetBucketLifecycle`, `PutBucketLifecycle`, `DeleteBucketLifecycle` |
-| Bucket replication | `GetBucketReplication`, `PutBucketReplication`, `DeleteBucketReplication` |
-| Bucket notifications | `GetBucketNotificationConfiguration`, `PutBucketNotificationConfiguration` |
-| Bucket policy | `GetBucketPolicy`, `PutBucketPolicy`, `DeleteBucketPolicy` |
-| Bucket encryption | `GetBucketEncryption`, `PutBucketEncryption`, `DeleteBucketEncryption` |
-| Static website hosting | `GetBucketWebsite`, `PutBucketWebsite`, `DeleteBucketWebsite` |
-| S3 Select | `SelectObjectContent` |
+| Family                 | Example operations                                                                     |
+|------------------------|----------------------------------------------------------------------------------------|
+| Object Lock / WORM     | `GetObjectLegalHold`, `PutObjectLegalHold`, `GetObjectRetention`, `PutObjectRetention` |
+| Bucket lifecycle       | `GetBucketLifecycle`, `PutBucketLifecycle`, `DeleteBucketLifecycle`                    |
+| Bucket replication     | `GetBucketReplication`, `PutBucketReplication`, `DeleteBucketReplication`              |
+| Bucket notifications   | `GetBucketNotificationConfiguration`, `PutBucketNotificationConfiguration`             |
+| Bucket policy          | `GetBucketPolicy`, `PutBucketPolicy`, `DeleteBucketPolicy`                             |
+| Bucket encryption      | `GetBucketEncryption`, `PutBucketEncryption`, `DeleteBucketEncryption`                 |
+| Static website hosting | `GetBucketWebsite`, `PutBucketWebsite`, `DeleteBucketWebsite`                          |
+| S3 Select              | `SelectObjectContent`                                                                  |
 
 Note: several of these (e.g. bucket policy, object lock) are also not supported by OVH Object Storage itself.
 

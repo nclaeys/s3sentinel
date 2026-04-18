@@ -81,7 +81,9 @@ lint: ## Run golangci-lint (install: https://golangci-lint.run/usage/install/)
 .PHONY: check
 check: vet test ## Run vet + tests (fast CI gate)
 
-# ── Dependencies ───────────────────────────────────────────────────────────────
+.PHONY: check-dirty
+check-dirty:
+	./scripts/check-dirty.sh
 
 .PHONY: tidy
 tidy: ## Tidy and verify go.mod / go.sum
@@ -92,8 +94,6 @@ tidy: ## Tidy and verify go.mod / go.sum
 download: ## Download all module dependencies
 	$(GO) mod download
 
-# ── Docker ─────────────────────────────────────────────────────────────────────
-
 .PHONY: docker-build
 docker-build: ## Build the Docker image
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
@@ -103,8 +103,6 @@ docker-run: ## Run the Docker image (reads .env if present)
 	docker run --rm --env-file .env \
 		-p 8080:8080 -p 8090:8090 -p 9090:9090 \
 		$(IMAGE_NAME):$(IMAGE_TAG)
-
-# ── Local dev stack (examples/basic) ──────────────────────────────────────────
 
 .PHONY: up
 up: ## Start the local dev stack (OPA + Zitadel) via docker-compose
@@ -118,8 +116,6 @@ down: ## Stop the local dev stack
 logs: ## Tail logs from the local dev stack
 	docker compose -f examples/basic/docker-compose.yml logs -f
 
-# ── OPA ────────────────────────────────────────────────────────────────────────
-
 .PHONY: opa-run
 opa-run: ## Start OPA locally, serving the policy/ directory
 	opa run --server --addr :8181 policy/
@@ -127,8 +123,6 @@ opa-run: ## Start OPA locally, serving the policy/ directory
 .PHONY: opa-check
 opa-check: ## Validate and type-check all .rego files
 	opa check policy/
-
-# ── STS key generation ─────────────────────────────────────────────────────────
 
 .PHONY: gen-sts-secret
 gen-sts-secret: ## Generate a random 32-byte HMAC key for STS_TOKEN_SECRET
