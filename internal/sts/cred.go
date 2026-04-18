@@ -13,7 +13,7 @@ import (
 	"github.com/dataminded/s3sentinel/internal/auth"
 )
 
-const sessionTokenIssuer = "s3sentinel-sts"
+const sessionTokenIssuer = "s3sentinel-sts" //nolint:gosec
 
 type Credentials struct {
 	AccessKeyID     string

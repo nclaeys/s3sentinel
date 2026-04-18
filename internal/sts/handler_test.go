@@ -37,12 +37,12 @@ func newHandlerWithValidator(v tokenValidator) *Handler {
 	}
 }
 
-func stsPostRequest(action, token string) *http.Request {
+func stsPostRequest(ctx context.Context, action, token string) *http.Request {
 	form := url.Values{"Action": {action}}
 	if token != "" {
 		form.Set("WebIdentityToken", token)
 	}
-	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return r
 }
@@ -52,7 +52,7 @@ func TestSTSHandler_NonPost(t *testing.T) {
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
-			r := httptest.NewRequest(method, "/", nil)
+			r := httptest.NewRequestWithContext(t.Context(), method, "/", http.NoBody)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
 			assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
@@ -64,7 +64,7 @@ func TestSTSHandler_NonPost(t *testing.T) {
 func TestSTSHandler_UnsupportedAction(t *testing.T) {
 	h := newHandlerWithValidator(&stubValidator{claims: testClaims()})
 
-	r := stsPostRequest("GetCallerIdentity", "some.token")
+	r := stsPostRequest(t.Context(), "GetCallerIdentity", "some.token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
@@ -76,7 +76,7 @@ func TestSTSHandler_MissingWebIdentityToken(t *testing.T) {
 	h := newHandlerWithValidator(&stubValidator{claims: testClaims()})
 
 	form := url.Values{"Action": {"AssumeRoleWithWebIdentity"}}
-	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -88,7 +88,7 @@ func TestSTSHandler_MissingWebIdentityToken(t *testing.T) {
 func TestSTSHandler_InvalidJWT(t *testing.T) {
 	h := newHandlerWithValidator(&stubValidator{err: errors.New("bad token")})
 
-	r := stsPostRequest("AssumeRoleWithWebIdentity", "bad.jwt.token")
+	r := stsPostRequest(t.Context(), "AssumeRoleWithWebIdentity", "bad.jwt.token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
@@ -100,7 +100,7 @@ func TestSTSHandler_Success(t *testing.T) {
 	claims := testClaims()
 	h := newHandlerWithValidator(&stubValidator{claims: claims})
 
-	r := stsPostRequest("AssumeRoleWithWebIdentity", "valid.jwt.token")
+	r := stsPostRequest(t.Context(), "AssumeRoleWithWebIdentity", "valid.jwt.token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
@@ -111,18 +111,18 @@ func TestSTSHandler_Success(t *testing.T) {
 	require.NoError(t, xml.NewDecoder(strings.NewReader(w.Body.String())).Decode(&resp))
 
 	assert.Equal(t, claims.Subject, resp.Result.SubjectFromWebIdentityToken)
-	assert.NotEmpty(t, resp.Result.Credentials.AccessKeyId)
+	assert.NotEmpty(t, resp.Result.Credentials.AccessKeyID)
 	assert.NotEmpty(t, resp.Result.Credentials.SecretAccessKey)
 	assert.NotEmpty(t, resp.Result.Credentials.SessionToken)
 	assert.NotEmpty(t, resp.Result.Credentials.Expiration)
-	assert.NotEmpty(t, resp.ResponseMetadata.RequestId)
+	assert.NotEmpty(t, resp.ResponseMetadata.RequestID)
 }
 
 func TestSTSHandler_Success_RoleArn(t *testing.T) {
 	claims := &auth.Claims{Subject: "bob", Email: "bob@example.com"}
 	h := newHandlerWithValidator(&stubValidator{claims: claims})
 
-	r := stsPostRequest("AssumeRoleWithWebIdentity", "valid.jwt.token")
+	r := stsPostRequest(t.Context(), "AssumeRoleWithWebIdentity", "valid.jwt.token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
@@ -132,14 +132,14 @@ func TestSTSHandler_Success_RoleArn(t *testing.T) {
 	require.NoError(t, xml.NewDecoder(strings.NewReader(w.Body.String())).Decode(&resp))
 
 	assert.Contains(t, resp.Result.AssumedRoleUser.Arn, "bob")
-	assert.Contains(t, resp.Result.AssumedRoleUser.AssumedRoleId, "bob")
+	assert.Contains(t, resp.Result.AssumedRoleUser.AssumedRoleID, "bob")
 }
 
 func TestSTSHandler_Success_SessionTokenValidates(t *testing.T) {
 	claims := testClaims()
 	h := newHandlerWithValidator(&stubValidator{claims: claims})
 
-	r := stsPostRequest("AssumeRoleWithWebIdentity", "valid.jwt.token")
+	r := stsPostRequest(t.Context(), "AssumeRoleWithWebIdentity", "valid.jwt.token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
