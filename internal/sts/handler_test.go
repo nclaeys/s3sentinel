@@ -76,7 +76,7 @@ func TestSTSHandler_MissingWebIdentityToken(t *testing.T) {
 	h := newHandlerWithValidator(&stubValidator{claims: testClaims()})
 
 	form := url.Values{"Action": {"AssumeRoleWithWebIdentity"}}
-	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)

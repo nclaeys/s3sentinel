@@ -240,7 +240,7 @@ func (h *Handler) forward(ctx context.Context, w http.ResponseWriter, r *http.Re
 	h.cfg.Logger.Debug("Forwarding request", "remote", r.RemoteAddr, "method", outReq.Method, "url", outReq.URL.String())
 	h.cfg.Logger.Debug("forwarding request headers", "headers", outReq.Header)
 
-	resp, err := h.httpClient.Do(outReq)
+	resp, err := h.httpClient.Do(outReq) //nolint:gosec // G704: backend URL is fixed config; only the path comes from the request
 	if err != nil {
 		h.cfg.Metrics.BackendRequestsTotal.WithLabelValues("502").Inc()
 		return writeS3Error(w, http.StatusBadGateway, "ServiceUnavailable", "backend unreachable")
@@ -342,7 +342,7 @@ func resolvePayloadHash(r *http.Request) (hash string, body io.Reader, contentLe
 func writeS3Error(w http.ResponseWriter, status int, code, message string) error {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(status)
-	_, err := fmt.Fprintf(w,
+	_, err := fmt.Fprintf(w, //nolint:gosec // G705: code and message are always internal constants, never user input
 		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>%s</Code><Message>%s</Message></Error>",
 		code, message,
 	)

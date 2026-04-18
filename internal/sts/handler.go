@@ -46,6 +46,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 	if err := r.ParseForm(); err != nil {
 		writeSTSError(w, http.StatusBadRequest, "InvalidRequest", "failed to parse request body")
 		return
@@ -168,7 +169,7 @@ type xmlResponseMetadata struct {
 func writeSTSError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "text/xml")
 	w.WriteHeader(status)
-	_, _ = fmt.Fprintf(w,
+	_, _ = fmt.Fprintf(w, //nolint:gosec // code and message are always internal constants, never user input
 		`<?xml version="1.0" encoding="UTF-8"?>`+"\n"+
 			`<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">`+"\n"+
 			`  <Error><Type>Sender</Type><Code>%s</Code><Message>%s</Message></Error>`+"\n"+

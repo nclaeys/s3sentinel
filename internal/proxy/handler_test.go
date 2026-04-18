@@ -135,7 +135,7 @@ func TestExtractAuth(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
 			if tc.authorization != "" {
 				r.Header.Set("Authorization", tc.authorization)
 			}
@@ -198,14 +198,14 @@ func TestResolvePayloadHash(t *testing.T) {
 	}
 
 	t.Run("presigned URL returns UNSIGNED-PAYLOAD", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodGet, "/bucket/key?X-Amz-Signature=abc", http.NoBody)
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/bucket/key?X-Amz-Signature=abc", http.NoBody)
 		hash, _, _, err := resolvePayloadHash(r)
 		require.NoError(t, err)
 		assert.Equal(t, "UNSIGNED-PAYLOAD", hash)
 	})
 
 	t.Run("UNSIGNED-PAYLOAD header returns UNSIGNED-PAYLOAD", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader("data"))
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/bucket/key", strings.NewReader("data"))
 		r.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
 		hash, _, _, err := resolvePayloadHash(r)
 		require.NoError(t, err)
@@ -213,7 +213,7 @@ func TestResolvePayloadHash(t *testing.T) {
 	})
 
 	t.Run("STREAMING-AWS4-HMAC-SHA256-PAYLOAD returns UNSIGNED-PAYLOAD", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader("data"))
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/bucket/key", strings.NewReader("data"))
 		r.Header.Set("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
 		hash, _, _, err := resolvePayloadHash(r)
 		require.NoError(t, err)
@@ -221,7 +221,7 @@ func TestResolvePayloadHash(t *testing.T) {
 	})
 
 	t.Run("STREAMING-UNSIGNED-PAYLOAD-TRAILER returns UNSIGNED-PAYLOAD", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader("data"))
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/bucket/key", strings.NewReader("data"))
 		r.Header.Set("X-Amz-Content-Sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
 		hash, _, _, err := resolvePayloadHash(r)
 		require.NoError(t, err)
@@ -229,7 +229,7 @@ func TestResolvePayloadHash(t *testing.T) {
 	})
 
 	t.Run("nil body returns empty-body hash", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodGet, "/bucket/key", http.NoBody)
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/bucket/key", http.NoBody)
 		hash, body, contentLength, err := resolvePayloadHash(r)
 		require.NoError(t, err)
 		assert.Equal(t, emptyBodyHash, hash)
@@ -239,7 +239,7 @@ func TestResolvePayloadHash(t *testing.T) {
 
 	t.Run("body is hashed and buffered", func(t *testing.T) {
 		data := []byte("hello world")
-		r := httptest.NewRequest(http.MethodPut, "/bucket/key", bytes.NewReader(data))
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/bucket/key", bytes.NewReader(data))
 		r.ContentLength = int64(len(data))
 
 		hash, body, contentLength, err := resolvePayloadHash(r)
@@ -264,7 +264,7 @@ func TestServeHTTP_MissingCredentials(t *testing.T) {
 	defer backend.Close()
 
 	h := newTestHandler(&stubOPA{allow: true}, backend.URL)
-	r := httptest.NewRequest(http.MethodGet, "/mybucket/mykey", http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/mybucket/mykey", http.NoBody)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
@@ -287,7 +287,7 @@ func TestServeHTTP_STS_NotConfigured(t *testing.T) {
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
-	r := httptest.NewRequest(http.MethodGet, "/mybucket/mykey", http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/mybucket/mykey", http.NoBody)
 	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=SENTINEL123")
 	r.Header.Set("X-Amz-Security-Token", "some.sts.token")
 	w := httptest.NewRecorder()
@@ -302,7 +302,7 @@ func TestServeHTTP_InvalidSTSToken(t *testing.T) {
 
 	h := newTestHandler(&stubOPA{allow: true}, backend.URL)
 
-	r := httptest.NewRequest(http.MethodGet, "/mybucket/mykey", http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/mybucket/mykey", http.NoBody)
 	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=SENTINEL123")
 	r.Header.Set("X-Amz-Security-Token", "not.a.valid.jwt")
 	w := httptest.NewRecorder()
