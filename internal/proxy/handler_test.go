@@ -71,7 +71,7 @@ func issueToken(t *testing.T, claims *auth.Claims) string {
 // which is the STS flow that bypasses the JWTValidator (a concrete struct, not an interface).
 func stsRequest(t *testing.T, method, rawURL, sessionToken string) *http.Request {
 	t.Helper()
-	r := httptest.NewRequest(method, rawURL, http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), method, rawURL, http.NoBody)
 	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=SENTINEL12345678901234/20260417/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fakesig")
 	r.Header.Set("X-Amz-Security-Token", sessionToken)
 	return r
