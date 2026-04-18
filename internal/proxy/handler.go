@@ -245,7 +245,7 @@ func (h *Handler) forward(ctx context.Context, w http.ResponseWriter, r *http.Re
 		h.cfg.Metrics.BackendRequestsTotal.WithLabelValues("502").Inc()
 		return writeS3Error(w, http.StatusBadGateway, "ServiceUnavailable", "backend unreachable")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	h.cfg.Metrics.BackendRequestsTotal.WithLabelValues(strconv.Itoa(resp.StatusCode)).Inc()
 
@@ -331,7 +331,7 @@ func resolvePayloadHash(r *http.Request) (hash string, body io.Reader, contentLe
 	}
 
 	data, readErr := io.ReadAll(r.Body)
-	r.Body.Close()
+	_ = r.Body.Close()
 	if readErr != nil {
 		return "", nil, 0, readErr
 	}

@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -99,7 +100,7 @@ func TestExtractBucketAndKey(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := http.NewRequest(http.MethodGet, tc.url, nil)
+			r, err := http.NewRequestWithContext(context.Background(), http.MethodGet, tc.url, http.NoBody)
 			assert.NoError(t, err)
 			if tc.host != "" {
 				r.Host = tc.host
@@ -116,7 +117,7 @@ func TestParse(t *testing.T) {
 	const proxyHost = "s3.example.com"
 
 	makeReq := func(method, rawURL string, headers ...string) *http.Request {
-		r, err := http.NewRequest(method, rawURL, nil)
+		r, err := http.NewRequestWithContext(context.Background(), method, rawURL, http.NoBody)
 		if err != nil {
 			panic(err)
 		}
@@ -170,12 +171,12 @@ func TestParse(t *testing.T) {
 		{
 			name: "GetBucketAcl",
 			req:  makeReq(http.MethodGet, "http://s3.example.com/mybucket?acl"),
-			want: S3RequestContext{Action: ActionGetBucketAcl, Bucket: "mybucket"},
+			want: S3RequestContext{Action: ActionGetBucketACL, Bucket: "mybucket"},
 		},
 		{
 			name: "PutBucketAcl",
 			req:  makeReq(http.MethodPut, "http://s3.example.com/mybucket?acl"),
-			want: S3RequestContext{Action: ActionPutBucketAcl, Bucket: "mybucket"},
+			want: S3RequestContext{Action: ActionPutBucketACL, Bucket: "mybucket"},
 		},
 		{
 			name: "GetBucketLocation",
@@ -256,12 +257,12 @@ func TestParse(t *testing.T) {
 		{
 			name: "GetObjectAcl",
 			req:  makeReq(http.MethodGet, "http://s3.example.com/mybucket/mykey?acl"),
-			want: S3RequestContext{Action: ActionGetObjectAcl, Bucket: "mybucket", Key: "mykey"},
+			want: S3RequestContext{Action: ActionGetObjectACL, Bucket: "mybucket", Key: "mykey"},
 		},
 		{
 			name: "PutObjectAcl",
 			req:  makeReq(http.MethodPut, "http://s3.example.com/mybucket/mykey?acl"),
-			want: S3RequestContext{Action: ActionPutObjectAcl, Bucket: "mybucket", Key: "mykey"},
+			want: S3RequestContext{Action: ActionPutObjectACL, Bucket: "mybucket", Key: "mykey"},
 		},
 		{
 			name: "GetObjectTagging",
@@ -317,7 +318,7 @@ func TestParse(t *testing.T) {
 		{
 			name: "virtual-hosted GetObject",
 			req: func() *http.Request {
-				r, _ := http.NewRequest(http.MethodGet, "http://mybucket.s3.example.com/prefix/mykey", nil)
+				r, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://mybucket.s3.example.com/prefix/mykey", http.NoBody)
 				r.Host = "mybucket.s3.example.com"
 				return r
 			}(),
@@ -326,7 +327,7 @@ func TestParse(t *testing.T) {
 		{
 			name: "virtual-hosted ListObjects",
 			req: func() *http.Request {
-				r, _ := http.NewRequest(http.MethodGet, "http://mybucket.s3.example.com/", nil)
+				r, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://mybucket.s3.example.com/", http.NoBody)
 				r.Host = "mybucket.s3.example.com"
 				return r
 			}(),

@@ -12,15 +12,11 @@ IMAGE_TAG  ?= dev
 
 .DEFAULT_GOAL := help
 
-# ── Help ───────────────────────────────────────────────────────────────────────
-
 .PHONY: help
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' \
 		| sort
-
-# ── Build ──────────────────────────────────────────────────────────────────────
 
 .PHONY: build
 build: ## Build the binary
@@ -35,8 +31,6 @@ build-linux: ## Cross-compile a static Linux binary (for Docker)
 clean: ## Remove build artefacts
 	rm -f $(BUILD_DIR)/$(BINARY)
 
-# ── Run ────────────────────────────────────────────────────────────────────────
-
 .PHONY: run
 run: ## Run the proxy (reads .env if present)
 	@if [ -f .env ]; then \
@@ -44,8 +38,6 @@ run: ## Run the proxy (reads .env if present)
 	else \
 		$(GO) run $(CMD); \
 	fi
-
-# ── Test ───────────────────────────────────────────────────────────────────────
 
 .PHONY: test
 test: ## Run all tests
@@ -64,8 +56,6 @@ cover: ## Generate and display a coverage report
 	$(GO) test -coverprofile=coverage.out ./...
 	$(GO) tool cover -html=coverage.out
 
-# ── Code quality ───────────────────────────────────────────────────────────────
-
 .PHONY: vet
 vet: ## Run go vet
 	$(GO) vet ./...
@@ -78,12 +68,16 @@ fmt: ## Format all Go source files
 lint: ## Run golangci-lint (install: https://golangci-lint.run/usage/install/)
 	golangci-lint run ./...
 
-.PHONY: check
-check: vet test ## Run vet + tests (fast CI gate)
+.PHONY: lint-fix
+lint-fix: ## Run golangci-lint and apply auto-fixes
+	golangci-lint run --fix ./...
 
 .PHONY: check-dirty
 check-dirty:
 	./scripts/check-dirty.sh
+
+.PHONY: check
+check: vet test lint ## Run vet + tests + lint (CI gate)
 
 .PHONY: tidy
 tidy: ## Tidy and verify go.mod / go.sum
