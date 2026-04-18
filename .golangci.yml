@@ -46,23 +46,3 @@ linters:
 formatters:
   enable:
     - goimports
-
-issues:
-  exclusions:
-    rules:
-      # Test files: relax errcheck, gosec, and noctx (httptest.NewRequest
-      # has no real context need; close errors in tests are not meaningful).
-      - path: ".*_test\\.go"
-        linters:
-          - errcheck
-          - gosec
-          - noctx
-      # unused-parameter is expected in httptest handler stubs in tests.
-      - path: ".*_test\\.go"
-        linters:
-          - revive
-        text: "unused-parameter"
-      # gocritic style suggestions are not enforced in test helpers.
-      - path: ".*_test\\.go"
-        linters:
-          - gocritic
