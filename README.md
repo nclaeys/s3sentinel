@@ -1,3 +1,5 @@
+<img src="assets/s3sentinelLogo.png" width="120" alt="S3 Sentinel logo">
+
 # S3 Sentinel
 
 An S3-compatible reverse proxy that adds identity-aware, policy-driven access control on top of EU cloud object storage (OVHcloud, Scaleway, Exoscale, Hetzner, …).
