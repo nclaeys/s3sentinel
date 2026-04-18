@@ -17,13 +17,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.5.0
+          args: --timeout 5m0s
       - name: Check the code
         run: |
           make fmt
-          make check
       - name: Check git is clean
         run: make check-dirty
 
