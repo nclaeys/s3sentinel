@@ -76,7 +76,7 @@ func (h *Handler) writeResponse(w http.ResponseWriter, response *assumeRoleWithW
 		h.logger.Warn("sts: failed to write xml header", "error", err)
 	}
 	encoder := xml.NewEncoder(w)
-	defer encoder.Close()
+	defer func() { _ = encoder.Close() }()
 	err = encoder.Encode(response)
 	if err != nil {
 		h.logger.Error("sts: failed to encode response", "error", err)
@@ -113,19 +113,19 @@ func (h *Handler) assumeRoleWithWebIdentity(r *http.Request) (*assumeRoleWithWeb
 		Xmlns: "https://sts.amazonaws.com/doc/2011-06-15/",
 		Result: assumeRoleResult{
 			Credentials: xmlCredentials{
-				AccessKeyId:     creds.AccessKeyID,
+				AccessKeyID:     creds.AccessKeyID,
 				SecretAccessKey: creds.SecretAccessKey,
 				SessionToken:    creds.SessionToken,
 				Expiration:      creds.Expiration.UTC().Format(time.RFC3339),
 			},
 			AssumedRoleUser: xmlAssumedRoleUser{
-				AssumedRoleId: assumedRoleID,
+				AssumedRoleID: assumedRoleID,
 				Arn:           roleArn,
 			},
 			SubjectFromWebIdentityToken: claims.Subject,
 		},
 		ResponseMetadata: xmlResponseMetadata{
-			RequestId: newRequestID(),
+			RequestID: newRequestID(),
 		},
 	}
 	return &resp, nil
@@ -150,19 +150,19 @@ type assumeRoleResult struct {
 }
 
 type xmlCredentials struct {
-	AccessKeyId     string `xml:"AccessKeyId"`
+	AccessKeyID     string `xml:"AccessKeyId"`
 	SecretAccessKey string `xml:"SecretAccessKey"`
 	SessionToken    string `xml:"SessionToken"`
 	Expiration      string `xml:"Expiration"`
 }
 
 type xmlAssumedRoleUser struct {
-	AssumedRoleId string `xml:"AssumedRoleId"`
+	AssumedRoleID string `xml:"AssumedRoleId"`
 	Arn           string `xml:"Arn"`
 }
 
 type xmlResponseMetadata struct {
-	RequestId string `xml:"RequestId"`
+	RequestID string `xml:"RequestId"`
 }
 
 func writeSTSError(w http.ResponseWriter, status int, code, message string) {
@@ -180,7 +180,7 @@ func writeSTSError(w http.ResponseWriter, status int, code, message string) {
 
 func newRequestID() string {
 	b := make([]byte, 16)
-	rand.Read(b) //nolint:errcheck
+	rand.Read(b) //nolint:errcheck,gosec
 	return fmt.Sprintf("%s-%s-%s-%s-%s",
 		hex.EncodeToString(b[0:4]),
 		hex.EncodeToString(b[4:6]),

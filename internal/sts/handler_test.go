@@ -52,7 +52,7 @@ func TestSTSHandler_NonPost(t *testing.T) {
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
-			r := httptest.NewRequest(method, "/", nil)
+			r := httptest.NewRequest(method, "/", http.NoBody)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
 			assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
@@ -111,11 +111,11 @@ func TestSTSHandler_Success(t *testing.T) {
 	require.NoError(t, xml.NewDecoder(strings.NewReader(w.Body.String())).Decode(&resp))
 
 	assert.Equal(t, claims.Subject, resp.Result.SubjectFromWebIdentityToken)
-	assert.NotEmpty(t, resp.Result.Credentials.AccessKeyId)
+	assert.NotEmpty(t, resp.Result.Credentials.AccessKeyID)
 	assert.NotEmpty(t, resp.Result.Credentials.SecretAccessKey)
 	assert.NotEmpty(t, resp.Result.Credentials.SessionToken)
 	assert.NotEmpty(t, resp.Result.Credentials.Expiration)
-	assert.NotEmpty(t, resp.ResponseMetadata.RequestId)
+	assert.NotEmpty(t, resp.ResponseMetadata.RequestID)
 }
 
 func TestSTSHandler_Success_RoleArn(t *testing.T) {
@@ -132,7 +132,7 @@ func TestSTSHandler_Success_RoleArn(t *testing.T) {
 	require.NoError(t, xml.NewDecoder(strings.NewReader(w.Body.String())).Decode(&resp))
 
 	assert.Contains(t, resp.Result.AssumedRoleUser.Arn, "bob")
-	assert.Contains(t, resp.Result.AssumedRoleUser.AssumedRoleId, "bob")
+	assert.Contains(t, resp.Result.AssumedRoleUser.AssumedRoleID, "bob")
 }
 
 func TestSTSHandler_Success_SessionTokenValidates(t *testing.T) {

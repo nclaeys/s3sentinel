@@ -1,0 +1,68 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - ineffassign
+    - unused
+    - revive
+    - misspell
+    - bodyclose
+    - noctx
+    - gosec
+    - gocritic
+    - prealloc
+
+  settings:
+    errcheck:
+      # Treat assignment of error to _ as checked (e.g. rand.Read).
+      check-blank: false
+    revive:
+      rules:
+        - name: var-naming
+        # Require doc comments only on public API — too noisy to enforce on
+        # every exported symbol in an internal codebase.
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+    gosec:
+      excludes:
+        # G101: fires on const names like "sessionTokenIssuer"; not a credential.
+        - G101
+        # G115: integer overflow — noisy for intentional numeric casts.
+        - G115
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+      disabled-checks:
+        - commentedOutCode
+        - whyNoLint
+
+formatters:
+  enable:
+    - goimports
+
+issues:
+  exclusions:
+    rules:
+      # Test files: relax errcheck, gosec, and noctx (httptest.NewRequest
+      # has no real context need; close errors in tests are not meaningful).
+      - path: ".*_test\\.go"
+        linters:
+          - errcheck
+          - gosec
+          - noctx
+      # unused-parameter is expected in httptest handler stubs in tests.
+      - path: ".*_test\\.go"
+        linters:
+          - revive
+        text: "unused-parameter"
+      # gocritic style suggestions are not enforced in test helpers.
+      - path: ".*_test\\.go"
+        linters:
+          - gocritic

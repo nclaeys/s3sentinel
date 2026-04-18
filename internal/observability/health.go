@@ -16,10 +16,10 @@ type Checker interface {
 // NewHealthHandler returns a liveness handler that always responds 200 OK.
 // If the process can handle HTTP traffic it is considered alive.
 func NewHealthHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck,gosec
 	})
 }
 
@@ -62,6 +62,6 @@ func NewReadyHandler(checkers map[string]Checker) http.Handler {
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		json.NewEncoder(w).Encode(results) //nolint:errcheck
+		json.NewEncoder(w).Encode(results) //nolint:errcheck,gosec
 	})
 }
