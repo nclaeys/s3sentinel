@@ -72,6 +72,10 @@ lint: ## Run golangci-lint (install: https://golangci-lint.run/usage/install/)
 lint-fix: ## Run golangci-lint and apply auto-fixes
 	golangci-lint run --fix ./...
 
+.PHONY: check-dirty
+check-dirty:
+	./scripts/check-dirty.sh
+
 .PHONY: check
 check: vet test lint ## Run vet + tests + lint (CI gate)
 
