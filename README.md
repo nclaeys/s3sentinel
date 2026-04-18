@@ -16,12 +16,12 @@ Flow B is compatible with boto3, AWS CLI, Spark, DuckDB,... since all of them su
 |-------------------------|-----------------|-------------------------------------------------------------------------------------|
 | Go                      | 1.25            | <https://go.dev/dl/>                                                                |
 | OPA                     | 1.10            | `brew install opa` or [download](https://github.com/open-policy-agent/opa/releases) |
-| An S3 compatible bucket | —               | OVH Control Panel                                                                   |
+| An S3 compatible bucket | —               | OVH, Minio (local development), Scaleway,...                                        |
 | An OIDC-capable IdP     | —               | Keycloak, Zitadel, Auth0, Google                                                    |
 
 ## Getting started
 
-Take a look at the `examples/basic` directory for a quickstart using the provided docker-compose file.
+Take a look at the [basic example](examples/basic/README.md) for a quickstart using the provided docker-compose file.
 
 ## Configuration reference
 
@@ -75,8 +75,6 @@ For production, point the variables at certificates issued by your CA or managed
 │       └── main.go              # Entry point, signal handling, server wiring
 ├── internal/
 │   ├── auth/                    # OIDC JWT validation with JWKS caching
-│   ├── config/
-│   ├── observability/
 │   ├── opa/                     # OPA REST API client
 │   ├── proxy/                   # Main pipeline: auth → OPA → re-sign → stream
 │   ├── s3/                      # S3 action/bucket/key parser to prepare OPA input
