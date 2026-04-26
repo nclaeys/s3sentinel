@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "s3sentinel.fullname" . }}
+  labels:
+    {{- include "s3sentinel.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "s3sentinel.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "s3sentinel.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "s3sentinel.serviceAccountName" . }}
+      containers:
+        - name: s3sentinel
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: LISTEN_ADDR
+              value: {{ .Values.listenAddr | quote }}
+            - name: ADMIN_ADDR
+              value: {{ .Values.adminAddr | quote }}
+            - name: BACKEND_ENDPOINT
+              value: {{ required "backend.endpoint is required" .Values.backend.endpoint | quote }}
+            - name: BACKEND_REGION
+              value: {{ .Values.backend.region | quote }}
+            - name: BACKEND_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3sentinel.backendSecretName" . }}
+                  key: accessKey
+            - name: BACKEND_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3sentinel.backendSecretName" . }}
+                  key: secretKey
+            - name: OPA_ENDPOINT
+              value: {{ required "opaEndpoint is required" .Values.opaEndpoint | quote }}
+            - name: JWKS_ENDPOINT
+              value: {{ required "jwt.jwksEndpoint is required" .Values.jwt.jwksEndpoint | quote }}
+            {{- if .Values.jwt.issuer }}
+            - name: JWT_ISSUER
+              value: {{ .Values.jwt.issuer | quote }}
+            {{- end }}
+            {{- if .Values.jwt.audience }}
+            - name: JWT_AUDIENCE
+              value: {{ .Values.jwt.audience | quote }}
+            {{- end }}
+            {{- if .Values.proxyHost }}
+            - name: PROXY_HOST
+              value: {{ .Values.proxyHost | quote }}
+            {{- end }}
+            {{- if .Values.tls.enabled }}
+            - name: TLS_CERT_FILE
+              value: {{ .Values.tls.certFile | quote }}
+            - name: TLS_KEY_FILE
+              value: {{ .Values.tls.keyFile | quote }}
+            {{- end }}
+            {{- if (include "s3sentinel.stsEnabled" .) }}
+            - name: STS_LISTEN_ADDR
+              value: {{ .Values.sts.listenAddr | quote }}
+            - name: STS_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3sentinel.stsSecretName" . }}
+                  key: tokenSecret
+            - name: STS_TOKEN_TTL
+              value: {{ .Values.sts.tokenTTL | quote }}
+            {{- end }}
+          ports:
+            - name: proxy
+              containerPort: {{ trimPrefix ":" .Values.listenAddr | default 8080 }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ trimPrefix ":" .Values.adminAddr | default 9090 }}
+              protocol: TCP
+            {{- if (include "s3sentinel.stsEnabled" .) }}
+            - name: sts
+              containerPort: {{ trimPrefix ":" .Values.sts.listenAddr | default 8090 }}
+              protocol: TCP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if and .Values.tls.enabled .Values.tls.existingSecret }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/s3sentinel/tls
+              readOnly: true
+          {{- end }}
+      {{- if and .Values.tls.enabled .Values.tls.existingSecret }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.existingSecret }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
