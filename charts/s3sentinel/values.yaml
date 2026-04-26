@@ -1,0 +1,102 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/nclaeys/s3sentinel
+  pullPolicy: IfNotPresent
+  tag: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Proxy listen address (env: LISTEN_ADDR)
+listenAddr: ":8080"
+
+# Admin server address — /healthz, /readyz, /metrics (env: ADMIN_ADDR)
+adminAddr: ":9090"
+
+# -- Required: S3-compatible backend configuration
+backend:
+  # Full URL of the backend, e.g. https://minio.example.com (env: BACKEND_ENDPOINT)
+  endpoint: ""
+  # AWS / S3 region (env: BACKEND_REGION)
+  region: ""
+  # Access key for the service account (env: BACKEND_ACCESS_KEY)
+  accessKey: ""
+  # Secret key for the service account (env: BACKEND_SECRET_KEY)
+  secretKey: ""
+  # Reference to an existing secret with keys: accessKey, secretKey
+  # When set, backend.accessKey and backend.secretKey are ignored.
+  existingSecret: ""
+
+# Domain the proxy is reachable on, enables virtual-hosted-style bucket requests
+# e.g. s3.internal.example.com  (env: PROXY_HOST)
+proxyHost: ""
+
+# -- Required: OPA policy endpoint (env: OPA_ENDPOINT)
+# e.g. http://opa:8181/v1/data/s3/allow
+opaEndpoint: ""
+
+# -- Required: JWT / OIDC settings
+jwt:
+  # JWKS URI of your IdP (env: JWKS_ENDPOINT)
+  jwksEndpoint: ""
+  # Expected `iss` claim (env: JWT_ISSUER)
+  issuer: ""
+  # Expected `aud` claim(s), comma-separated (env: JWT_AUDIENCE)
+  audience: ""
+
+# -- Optional: TLS termination at the proxy
+tls:
+  enabled: false
+  # Path inside the container to the PEM certificate (env: TLS_CERT_FILE)
+  certFile: ""
+  # Path inside the container to the PEM private key (env: TLS_KEY_FILE)
+  keyFile: ""
+  # Name of an existing TLS secret (type: kubernetes.io/tls) to mount
+  existingSecret: ""
+
+# -- Optional: STS credential-vending server
+# The STS server is only started when sts.tokenSecret is non-empty.
+sts:
+  listenAddr: ":8090"
+  # HMAC secret used to sign/validate session tokens (env: STS_TOKEN_SECRET)
+  tokenSecret: ""
+  # Reference to an existing secret with key: tokenSecret
+  existingSecret: ""
+  # Lifetime of issued credentials, e.g. "1h" (env: STS_TOKEN_TTL)
+  tokenTTL: "1h"
+
+service:
+  # Service for the S3 proxy port
+  proxy:
+    type: ClusterIP
+    port: 8080
+  # Service for the admin port (/healthz, /readyz, /metrics)
+  admin:
+    type: ClusterIP
+    port: 9090
+  # Service for the STS server (only created when sts.tokenSecret is set)
+  sts:
+    type: ClusterIP
+    port: 8090
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: s3sentinel.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []

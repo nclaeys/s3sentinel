@@ -1,0 +1,7 @@
+apiVersion: v2
+name: s3sentinel
+description: S3-compatible proxy with OPA policy enforcement and JWT authentication
+type: application
+version: 0.1.0
+icon: https://raw.githubusercontent.com/nclaeys/s3sentinel/main/assets/s3sentinelLogo.png
+appVersion: "0.1.0"

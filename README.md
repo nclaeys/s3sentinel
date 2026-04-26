@@ -13,12 +13,12 @@ An S3-compatible reverse proxy that adds **identity-aware, policy-driven access 
 EU cloud providers issue bucket-level service-account credentials and have limited or no support for STS or resource-level policies. S3 Sentinel sits in front of your bucket, owns the service-account key, and authorises every S3 operation against [OPA](https://www.openpolicyagent.org/) using the caller's OIDC identity — without requiring any changes to existing S3 client code.
 
 ```
-Your clients                S3 Sentinel                  Object storage
-─────────────               ─────────────                ──────────────
-boto3 / AWS CLI ──► :8080  validate JWT ──► OPA :8181   
-DuckDB          ──► :8080  authorise    ──► re-sign  ──► MinIO / OVH / Scaleway
-Spark           ──► :8090  issue creds                   
-                   (STS)
+Your clients                S3 Sentinel                        Object storage
+─────────────               ─────────────                      ──────────────
+boto3 / AWS CLI ──► :8080  validate JWT      ──► OPA :8181   
+DuckDB          ──► :8080  authorise         ──► re-sign   ──► MinIO / OVH / Scaleway
+Spark           ──► :8090  issue creds (STS)                   
+                   
 ```
 
 Two authentication flows are supported:

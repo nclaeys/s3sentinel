@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "s3sentinel.fullname" . }}
+  labels:
+    {{- include "s3sentinel.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.proxy.type }}
+  selector:
+    {{- include "s3sentinel.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: proxy
+      port: {{ .Values.service.proxy.port }}
+      targetPort: proxy
+      protocol: TCP
+    - name: admin
+      port: {{ .Values.service.admin.port }}
+      targetPort: admin
+      protocol: TCP
+    {{- if (include "s3sentinel.stsEnabled" .) }}
+    - name: sts
+      port: {{ .Values.service.sts.port }}
+      targetPort: sts
+      protocol: TCP
+    {{- end }}
