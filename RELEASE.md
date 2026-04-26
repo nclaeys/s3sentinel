@@ -1,4 +1,4 @@
-# 0.1 initial version
+# 0.1.0 initial version
 
 - implement STS and S3 endpoints
 - make sure basic operations work with docker-compose as well as S3-compatible object storage
